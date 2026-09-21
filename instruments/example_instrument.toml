@@ -1,0 +1,53 @@
+# Instrument configuration (template).
+
+[instrument]
+# name of the AO system and of the telescope it is mounted on
+# Seen in code: "T152-Papyrus", a literal in AutomaticAnalysis.py (report title)
+name = "Example"
+telescope = "T1"
+
+[telescope]
+# pupil diameter [m]
+diameter_m = 3
+# central obstruction as a diameter ratio [0-1]
+obstruction_ratio = 0.3
+
+[dm]
+# total number of actuators
+n_actuators = 241
+# number of actuators in the DM diameter
+actuators_in_diameter = 17
+# ratio of the size of the on-sky pupil and the calibration pupil on the DM
+sky_calib_pupil_ratio = 1
+
+[wfs]
+# wavefront sensor type
+type = "PWFS"
+# wavelength the WFS operates at [nm]
+wvl_nm = 640
+# wavelength the interaction matrix was calibrated at [nm]
+interaction_matrix_wvl_nm = 640
+# number of lenslets across the pupil
+n_lenslets_across = 20
+# readout noise [e-/pix]
+ron = 1
+# is the camera an EMCCD
+emccd = 0
+# modulation radius in units of lambda/DM
+modulation = 2
+
+[science_camera]
+# central wavelength of the science filter [nm]
+wvl_nm = 1550
+# bandpass of the science filter [nm]
+bandpass_nm = 0
+# wavelength the PSF sampling was calibrated at [nm]
+calibration_wvl_nm = 1550
+# pixels per lambda/D at the calibration wavelength, with the calibration pupil
+sampling_at_calibration = 4
+# readout noise [e-/pix]
+ron = 2
+
+[conventions]
+# wavelength that r0, tau0 and V0 are referred to in results and plot labels [nm]
+r0_reference_wvl_nm = 500

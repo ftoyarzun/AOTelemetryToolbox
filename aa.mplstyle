@@ -1,0 +1,54 @@
+# Custom matplotlib style for article GSC
+# -----
+# To get all matplotlib parameters
+#  >>> matplotlib.rcParams
+# -----
+
+## Axes definition
+
+axes.edgecolor : 'black'
+axes.facecolor : 'white'
+axes.formatter.use_mathtext : False     # True for nice maths in caption
+axes.labelcolor : 'black'
+axes.labelpad : 4.
+
+## Tick definition
+
+xtick.direction : in
+ytick.direction : in
+xtick.minor.visible : True
+ytick.minor.visible : True
+xtick.major.size : 4
+xtick.major.width : 0.7
+xtick.minor.size : 2
+xtick.minor.width : 0.7
+xtick.minor.ndivs : 4
+ytick.major.size : 4
+ytick.major.width : 0.7
+ytick.minor.size : 2
+ytick.minor.width : 0.7
+ytick.minor.ndivs : 4
+
+## Font definition
+
+font.size : 10
+
+## Figure definition
+
+#figure.dpi : 300
+#figure.edgecolor : 'white'
+#figure.facecolor : 'white'
+#figure.figsize : [6.4, 4.8]
+
+## LaTeX engine
+
+#pgf.texsystem : xelatex # or pdflatex
+#text.latex.preamble : \usepackage{amsmath} \usepackage{amssymb} \usepackage{fourier}
+
+## Saving parameters
+
+pdf.compression: 6
+savefig.format: 'pdf'
+savefig.pad_inches : 0.1
+savefig.bbox : tight
+savefig.transparent : False

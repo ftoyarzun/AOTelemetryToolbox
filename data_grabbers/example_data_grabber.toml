@@ -1,0 +1,64 @@
+# Data grabber configuration (template).
+# Used by src/telemetry.py: python src/telemetry.py <duration_s> <this_file>.toml
+# Copy this file, then replace every "TODO". The script refuses to start while
+# a required value is still "TODO" or missing.
+
+# Shared-memory (dao) images to read from, given as the path of the .im.shm file.
+# Scalar settings (fps, gain, ...) are read as the [0, 0] element of their image.
+
+[shm.wfs]
+# calibrated wavefront sensor frames
+frames = "TODO"
+# valid pixel map of the wavefront sensor, read once
+valid_pixel_map = "TODO"
+# wavefront sensor measurements, grabbed together with the frames
+measurements = "TODO"
+# wavefront sensor frame rate [Hz], saved as the loop frequency
+fps = "TODO"
+# wavefront sensor camera gain
+gain = "TODO"
+
+[shm.dm]
+# deformable mirror commands, grabbed together with the wavefront sensor frames
+commands = "TODO"
+# modes to commands matrix, read once
+m2c = "TODO"
+
+[shm.loop]
+# loop gain and leak
+cmd = "TODO"
+gain = "TODO"
+leak = "TODO"
+
+[shm.science]
+# calibrated science camera frames
+frames = "TODO"
+# exposure time
+dit = "TODO"
+# science camera frame rate [Hz]
+fps = "TODO"
+# science camera gain
+gain = "TODO"
+
+[acquisition]
+# dao semaphore number the readers wait on
+semaphore = "TODO"
+# keep one wavefront sensor frame out of this many (1 keeps all of them)
+wfs_frame_step = 1
+
+# Optional window of the science frame to read, in pixels as [start, stop].
+# Leave both lines out to read the whole frame.
+# [acquisition.science_crop]
+# y = [0, 400]
+# x = [0, 400]
+
+[calibration]
+# .npy files saved as Calibration/DM_modes and Calibration/Z_full_resolution
+dm_modes = "TODO"
+z_modes = "TODO"
+
+[output]
+# folder for the observation HDF5 files, a subfolder per date is created inside
+hdf5_dir = "TODO"
+# folder for the PDF reports, a subfolder per date is created inside
+report_dir = "TODO"

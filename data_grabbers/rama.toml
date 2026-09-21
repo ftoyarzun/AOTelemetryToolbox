@@ -1,0 +1,41 @@
+# Data grabber configuration for the "rama" machine, filled in from the values
+# that used to be hard-coded in src/telemetry.py.
+# See example_data_grabber.toml for what each value means.
+
+[shm.wfs]
+frames = "/tmp/pyrImCalExtract.im.shm"
+valid_pixel_map = "/tmp/pyrPup.im.shm"
+measurements = "/tmp/pyrModesNN.im.shm"
+fps = "/tmp/pyrImFps.im.shm"
+gain = "/tmp/pyrImGain.im.shm"
+
+[shm.dm]
+commands = "/tmp/dm1Cmd.im.shm"
+m2c = "/tmp/dm1M2A.im.shm"
+
+[shm.loop]
+cmd = "/tmp/lpCmdNN.im.shm"
+gain = "/tmp/lpGain.im.shm"
+leak = "/tmp/lpLeak.im.shm"
+
+[shm.science]
+frames = "/tmp/sciImCal.im.shm"
+dit = "/tmp/sciImDit.im.shm"
+fps = "/tmp/sciImFps.im.shm"
+gain = "/tmp/sciImGain.im.shm"
+
+[acquisition]
+semaphore = 8
+wfs_frame_step = 100
+
+[acquisition.science_crop]
+y = [400, 800]
+x = [800, 1200]
+
+[calibration]
+dm_modes = "/home/rama/rama-dev/foyarzun/CNN/Data/DM_IF.npy"
+z_modes = "/home/rama/rama-dev/foyarzun/CNN/Data/z_modes.npy"
+
+[output]
+hdf5_dir = "/home/rama/DAODATA/telemetry_hdf5"
+report_dir = "/home/rama/rama-dev/telemetry_analysis/Reports"
