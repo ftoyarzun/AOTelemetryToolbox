@@ -1,0 +1,84 @@
+# Data grabber configuration: the one data grabber config of the project, edit it for
+# this machine. Read by aott/telemetry.py (python -m aott.telemetry <target> <duration_s>),
+# and its [output] section by aott/AutomaticAnalysis.py and aott/NightlyReport.py.
+# The instrument values (site, pupil, wavelengths...) are in config/instrument.toml.
+# Replace every "TODO": telemetry.py refuses to start while a required value is
+# still "TODO" or missing. data_grabber_rama.toml and windows_dev.toml hold filled-in
+# values for other machines to copy from.
+
+# Shared-memory (dao) images to read from, given as the path of the .im.shm file.
+# Scalar settings (fps, gain, ...) are read as the [0, 0] element of their image.
+
+[shm.wfs]
+# calibrated wavefront sensor frames
+frames = "TODO"
+# valid pixel map of the wavefront sensor, read once
+valid_pixel_map = "TODO"
+# wavefront sensor measurements, grabbed together with the frames
+measurements = "TODO"
+# wavefront sensor frame rate [Hz], saved as the loop frequency
+fps = "TODO"
+# wavefront sensor camera gain
+gain = "TODO"
+
+[shm.dm]
+# deformable mirror commands, grabbed together with the wavefront sensor frames
+commands = "TODO"
+# modes to commands matrix, read once
+m2c = "TODO"
+
+[shm.loop]
+# loop command (open/closed status), grabbed together with the DM commands
+cmd = "TODO"
+# loop gain and leak
+gain = "TODO"
+leak = "TODO"
+
+[shm.science]
+# calibrated science camera frames
+frames = "TODO"
+# exposure time
+dit = "TODO"
+# science camera frame rate [Hz]
+fps = "TODO"
+# science camera gain
+gain = "TODO"
+
+[acquisition]
+# dao semaphore number the readers wait on
+semaphore = "TODO"
+# keep one wavefront sensor frame out of this many (1 keeps all of them)
+wfs_frame_step = 1
+
+# Optional window of the science frame to read, in pixels as [start, stop].
+# Leave both lines out to read the whole frame.
+# [acquisition.science_crop]
+# y = [0, 400]
+# x = [0, 400]
+
+[calibration]
+# Each value is either a .npy file or a dao .im.shm file, read once.
+# DM influence functions, saved as Calibration/DM_modes, (n_act, res, res) or (res*res, n_act)
+dm_modes = "TODO"
+# Zernike to DM commands matrix, saved as Calibration/Z2C, (n_act, n_zernike) either way round
+Z2C = "TODO"
+
+# Optional: uncomment the ones that exist. A dataset whose line is left out is
+# not written to the HDF5 file.
+# interaction matrix, saved as Calibration/Interaction_Matrix
+# interaction_matrix = "TODO"
+# wavefront sensor dark and reference frame, saved as WFS/Dark and WFS/Reference_Frame
+# wfs_dark = "TODO"
+# wfs_reference_frame = "TODO"
+# DM flat and offset commands, saved as WFS/DM_flat and WFS/DM_offset
+# dm_flat = "TODO"
+# dm_offset = "TODO"
+# science camera dark, saved as Science/Dark. Give the full frame: it is cropped
+# with [acquisition.science_crop] like the science frames.
+# science_dark = "TODO"
+
+[output]
+# folder for the observation HDF5 files, a subfolder per UTC date is created inside
+hdf5_dir = "TODO"
+# folder for the PDF reports, a subfolder per date is created inside
+report_dir = "TODO"

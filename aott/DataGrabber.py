@@ -10,6 +10,8 @@ try:
 except ImportError:  # Python < 3.11
     import tomli as tomllib
 
+from aott.config import DATA_GRABBER_FILE
+
 # Keys that must be present, and not "TODO", in the data grabber config file
 REQUIRED_KEYS = [
     "shm.wfs.frames",
@@ -21,19 +23,20 @@ REQUIRED_KEYS = [
     "shm.dm.m2c",
     "shm.loop.gain",
     "shm.loop.leak",
+    "shm.loop.cmd",
     "shm.science.frames",
     "shm.science.dit",
     "shm.science.fps",
     "shm.science.gain",
     "acquisition.semaphore",
     "calibration.dm_modes",
-    "calibration.z_modes",
+    "calibration.Z2C",
     "output.hdf5_dir",
     "output.report_dir",
 ]
 
 
-def LoadConfig(path):
+def LoadConfig(path=DATA_GRABBER_FILE):
     """Read the data grabber TOML file and exit if a required value is missing."""
 
     with open(path, "rb") as f:

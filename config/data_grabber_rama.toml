@@ -1,6 +1,7 @@
 # Data grabber configuration for the "rama" machine, filled in from the values
-# that used to be hard-coded in src/telemetry.py.
-# See example_data_grabber.toml for what each value means.
+# that used to be hard-coded in aott/telemetry.py.
+# Not read by any code: copy these values into data_grabber.toml to use them.
+# See data_grabber.toml for what each value means.
 
 [shm.wfs]
 frames = "/tmp/pyrImCalExtract.im.shm"
@@ -34,7 +35,7 @@ x = [800, 1200]
 
 [calibration]
 dm_modes = "/home/rama/rama-dev/foyarzun/CNN/Data/DM_IF.npy"
-z_modes = "/home/rama/rama-dev/foyarzun/CNN/Data/z_modes.npy"
+Z2C = "/home/rama/rama-dev/foyarzun/CNN/Data/Z2C.npy"
 
 [output]
 hdf5_dir = "/home/rama/DAODATA/telemetry_hdf5"

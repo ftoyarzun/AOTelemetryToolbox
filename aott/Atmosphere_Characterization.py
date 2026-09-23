@@ -1,492 +1,189 @@
 import numpy as np
-import pylab as plt
-import math
-from scipy.interpolate import interp1d
-from scipy.optimize import curve_fit
-from scipy.signal import welch
-
 import h5py
 
-
-
-def RadialOrder(nModes):
-    index = 2
-    jump = 3
-    radial_order_matrix = []
-    while index < nModes:
-        radial_order_matrix.append(index)
-        index += jump
-        jump += 1
-    
-    return np.array(radial_order_matrix)
-
-def RadialOrderArray(nModes):
-    index = 2
-    number_of_modes_in_radial_order = 3
-    index_matrix = []
-    while index < nModes:
-        local_index_matrix = []
-        for ii in range(number_of_modes_in_radial_order):
-            local_index_matrix.append(index)
-            index += 1
-            if index == nModes:
-                break
-        index_matrix.append(local_index_matrix)
-        number_of_modes_in_radial_order +=1
-    
-    return index_matrix
-
-
-def ComputeRadialOrderMean(Z_variance, radialOrderModes):
-    return np.mean(Z_variance[radialOrderModes], axis = 0)
-
-def ComputeRadialOrderMeans(Z_Series, radial_mode_arrays):
-    return np.array([ComputeRadialOrderMean(Z_Series, modes) for modes in radial_mode_arrays])
-
-def ZernikeTurbulenceVariance(r0, L0, D, n):
-    radial_order_variance = []
-    variance_n1 = 2.34e-2 * (D/r0)**(5/3) * (1 - 0.39 * (2 * np.pi * D / L0)**2 + 0.27 * (2 * np.pi * D / L0)**(7/3))
-    
-    radial_order_variance.append(variance_n1)
-
-    for i in range(3,n+2):
-        variance_n = 0.756 * (i+1) * math.gamma(i - 5/6)/math.gamma(i + 23/6) * (D/r0)**(5/3) * (1 - 0.38/((i - 11/6)*(i+23/6))*(2 * np.pi * D / L0)**2)
-        radial_order_variance.append(variance_n)
-
-    return np.array(radial_order_variance)
-
-def ProjectPhaseSeries(phaseSeries, basis):
-    phaseSeries_flatten = phaseSeries.reshape(phaseSeries.shape[0], -1)
-    Z_modes = (basis.T @ phaseSeries_flatten.T).T
-
-    return Z_modes
-
-def NollMatrix(D, r0, n):
-    return (D / r0) ** (5./3.) * 0.15337 * (n + 1)* math.gamma(14/3)*math.gamma(n - 5/6) / (math.gamma(17/6)**2 * math.gamma(n + 23/6))
-
-
-def ComputeCoherenceTime(D_tau, dt):
-    
-    N, T = D_tau.shape
-    
-    tau_vec = np.zeros((N, 1))
-    
-    lags = np.arange(0, T) * dt
-    
-    for i in range(N):
-        over_1_rad = np.where(D_tau[i] > 1)[0]
-        if len(over_1_rad) == 0:
-            tau = np.nan
-        else:
-            i1 = over_1_rad[0]
-            if i1 == 0:
-                tau = lags[0]
-            else:
-                # Interpolate for better precision
-                f = interp1d(D_tau[i][i1 - 1:i1 + 1], lags[i1 - 1:i1 + 1], kind='linear')
-                tau = f(1)
-                
-        tau_vec[i] = tau
-
-    if np.sum(np.isnan(tau_vec)) > 5:
-        print("Some intervals have larger coherence time than requested, increase the lookahead time!")
-    return tau_vec[~np.isnan(tau_vec)]
-
-
-def ComputeR0L0(Z_timeSeries, D, display = False):
-
-    nModes = Z_timeSeries.shape[1]
-    radial_mode_arrays = RadialOrderArray(nModes)
-    radial_order = np.arange(2,2 + len(radial_mode_arrays))
-
-    Z_variance = np.var(Z_timeSeries, axis = 0)
-    measured_variances = ComputeRadialOrderMeans(Z_variance, radial_mode_arrays)
-
-    scale = np.linspace(1,10,len(radial_mode_arrays))
-
-    # Wrap the model to fix dm_psd
-    model = lambda x, r0, L0: np.log(np.abs(ZernikeTurbulenceVariance(r0, L0, D = D, n = len(radial_mode_arrays)))) / scale
-
-    # Fit only r0
-    A_fit, _ = curve_fit(model, radial_order, np.log(measured_variances) / scale, p0=[0.1, 150], bounds=(0.001, np.inf))
-
-    predicted_variances = ZernikeTurbulenceVariance(r0 = A_fit[0], L0 = A_fit[1], D = D, n = len(radial_mode_arrays))
-
-    if display:
-        plt.figure()
-        plt.semilogy(np.array(measured_variances), label = 'DM Radial PSD')
-        plt.semilogy(predicted_variances, label = 'Prediction PSD')
-        plt.legend()
-
-    return A_fit
-
-def PhaseTemporalStructureFunction(delay, wind_speed, r0):
-    return 6.88 * (wind_speed * delay / r0) ** (5/3)
-
-
-def GetEstimatedAverageWindSpeedFittingStructureFunction(D_tau, dt, r0):
-    N, T = D_tau.shape
-    wind_speed_vec = np.zeros((N, 1))
-    lags = np.arange(0, T) * dt
-
-    model = lambda delay, wind_speed: PhaseTemporalStructureFunction(delay, wind_speed, r0 = r0)
-
-    for i in range(N):
-        A_fit, _ = curve_fit(model, lags, D_tau[i], p0=[10], bounds=(0.001, np.inf))
-        wind_speed_vec[i] = A_fit[0]
-
-    return np.array(wind_speed_vec)
-
-
-def temporal_structure_function(images,diameter, max_lag):
-    T = images.shape[0]
-    D = np.zeros(max_lag + 1)
-
-    for tau in range(max_lag + 1):
-        diff = images[:T-tau] - images[tau:T]
-        D[tau] = np.mean(diff**2) * diameter**2
-
-    return D
-
-
-## NEW WIND ESTIMATION
-
-def loglog_derivative(f, psd):
-    d1 = np.gradient(psd, f) * f / psd
-    return d1
-
-def find_min_derivative(f, d1):
-    idx_min = np.argmin(d1)
-    return f[idx_min], idx_min
-
-def third_derivative(f, psd):
-
-    d1 = loglog_derivative(f, psd)
-    d2 = np.gradient(d1, f)
-    d3 = np.gradient(d2, f)
-    return d3
-
-def last_zero_before_min(f, d3, idx_min):
-    # sign changes indicate zero crossings
-    sign = np.sign(d3)
-    zero_crossings = np.where(np.diff(sign))[0]
-
-    # only crossings before min
-    zero_before = zero_crossings[zero_crossings < idx_min]
-
-    if len(zero_before) == 0:
-        return None, None
-
-    idx = zero_before[-1]
-    return f[idx], idx
-
-def find_inertial_range_start(f, psd):
-    d1 = loglog_derivative(f, psd)
-    f_min, idx_min = find_min_derivative(f, d1)
-
-    d3 = third_derivative(f, psd)
-    f_zero, idx_zero = last_zero_before_min(f, d3, idx_min)
-
-    return f_zero
-
-def GetEstimatedAverageWindspeedZernikeTemporalCutoff(signal, period, leak, radial_mode_arrays, diameter, display = False):
-    f, Zernike_psds = GetRadialOrderTemporalPSD(signal, period, radial_mode_arrays)
-    optimize_mask = f > 0
-    params = np.array(GetZernikeTemporalCutoffFrequency(f[optimize_mask], Zernike_psds[:, optimize_mask], period, leak))
-
-    N, _ = Zernike_psds.shape
-
-    # cutoffs = np.zeros(params.shape[1])
-    # for i in range(N):
-    #     model_psd = TotalTransferFunction(f, period, *params[:,i])
-    #     cutoffs[i] = find_inertial_range_start(f, model_psd)
-
-    # print(cutoffs)
-
-    n_array = np.arange(2, 2 + N)
-    wind_speed_estimation = diameter * np.sum(params[2,:].T * (n_array + 1)) / np.sum(0.3 * (n_array + 1)**2)
-    effective_gain = np.mean(params[-4])
-    effective_delay = np.mean(params[-2])
-    #
-    if display:
-        
-        cmap = plt.get_cmap('viridis')
-        colors = cmap(np.linspace(0, 1, N))
-        fig, ax = plt.subplots()
-        
-        for i in range(N):
-            ax.loglog(f, Zernike_psds[i], color = colors[i], linestyle = '-')
-            ax.loglog(f, TotalTransferFunction(f, period, *params[:,i]), color = colors[i], linestyle = '--')
-
-    return wind_speed_estimation, effective_gain, effective_delay
-
-
-def LowPassTransferFunction(f,omega, alpha):
-    return 1 / (1 + (f/omega) ** (alpha))
-
-def GetRadialOrderTemporalPSD(signal, period, radial_mode_arrays):
-    f, Zernike_psds = GetSignalPSD(signal.T, period)
-    Zernike_psds = ComputeRadialOrderMeans(Zernike_psds, radial_mode_arrays)
-    return f, Zernike_psds
-
-def AOTransferFunctions(f, period, ki, leak, NFramesDelay, noise):
-    s = 2 * np.pi * 1j * f
-    sT = s * period
-
-    Hdm = (1 - np.exp(-sT)) / sT
-    Hwfs = (1 - np.exp(-sT)) / sT
-    Hdelay = np.exp(- NFramesDelay * sT)
-    Hcontroller = ki / (leak - np.exp(-sT))
-    Hnoise = np.abs(sT * 0 + noise)
-
-    return Hdm, Hdelay, Hcontroller, Hwfs, Hnoise
-
-def TotalTransferFunction(f, period, amp1,alpha, omega1, alpha1, ki, leak, Ndelay, noise):
-    Hdm, Hdelay, Hcontroller, Hwfs, Hnoise = AOTransferFunctions(f + f[1], period, ki, leak, Ndelay, noise)
-
-    signal_tf = np.abs((Hdm * Hdelay * Hcontroller)/(1 + Hwfs * Hdm * Hdelay * Hcontroller))**2
-    atm_tf = amp1 * (f + f[1]) ** (-alpha) * LowPassTransferFunction(f, omega1, alpha1) * np.abs(Hwfs)**2 + Hnoise
-
-
-    return signal_tf * atm_tf
-
-def AtmosphereTransferFunction(f, period, amp, alpha, ki, leak, Ndelay, noise):
-    Hdm, Hdelay, Hcontroller, Hwfs, Hnoise = AOTransferFunctions(f + f[1], period, ki, leak, Ndelay, noise)
-
-    signal_tf = np.abs((Hdm * Hdelay * Hcontroller)/(1 + Hwfs * Hdm * Hdelay * Hcontroller))**2
-    atm_tf = amp / ((f + f[1]) ** alpha) * np.abs(Hwfs)**2 + Hnoise
-
-    return signal_tf * atm_tf
-
-
-
-def GetZernikeTemporalCutoffFrequency(f, Zernike_psds, period, leak):
-
-    N, _ = Zernike_psds.shape
-    amplitudes = np.zeros((N,1))
-    cutoffFrequencies = np.zeros((N,1))
-    alphas = np.zeros((N,1))
-    alphas1 = np.zeros((N,1))
-    kis = np.zeros((N,1))
-    Ndelays = np.zeros((N,1))
-    noises = np.zeros((N,1))
-    leaks = np.ones((N,1)) * leak
-
-
-    scale = np.linspace(1,10,f.shape[0])
-
-
-
-    model = lambda f,amp1,alpha, omega1, alpha1, ki, Ndelay, noise : np.log(TotalTransferFunction(f + 1e-8, period, amp1,alpha, omega1, alpha1, ki, leak, Ndelay, noise)) / scale
-
-    lower = [0, 0.,    0,   5/3, 0.1, 1., 0]
-    upper = [np.inf,1, 200, 23/3, 0.8, 3.5, 1]
-
-
-    for i in range(N):
-        A_fit, _ = curve_fit(model, f, np.log(Zernike_psds[i]) / scale, p0=[5e-1, 0.5, 5, 11/3, 0.44, 1.8, 0.5e-6], bounds=(lower, upper), maxfev=1500)
-        amplitudes[i] = A_fit[0]
-        alphas[i] = A_fit[1]
-        cutoffFrequencies[i] = A_fit[2]
-        alphas1[i] = A_fit[3]
-        kis[i] = A_fit[4]
-        Ndelays[i] = A_fit[5]
-        noises[i] = A_fit[6]
-
-    return amplitudes, alphas, cutoffFrequencies, alphas1, kis, leaks, Ndelays, noises
-
-def GetAtmosphereDynamicParameters(f, psd, period, leak):
-
-    scale = np.linspace(1,10,f.shape[0])
-
-
-    model = lambda f,amp1, alpha1, ki, Ndelay, noise : np.log(AtmosphereTransferFunction(f + 1e-8, period, amp1, alpha1, ki, leak, Ndelay, noise)) / scale
-
-    lower = [0,        6/3, 0.1, 0.5, 0]
-    upper = [np.inf, 23/3, 0.8, 3.5, 1]
-
-    A_fit, _ = curve_fit(model, f, np.log(psd) / scale, p0=[1.4, 11/3, 0.44, 1.8, 0.5e-6], bounds=(lower, upper))
-
-    A_fit.insert(3, leak)
-    return A_fit
-
-def GetSignalPSD(signal, period):
-    return welch(signal, 1/period, nperseg=1000)
+from aott.atmosphere_characterization_tools import (
+    estimate_r0_L0,
+    estimate_tau0_v0_structure_function,
+    estimate_wind_gain_delay_from_psd,
+    estimate_wind_speed_autocorrelation_cutoff,
+    compute_zernike_psd,
+    compute_zernike_psd_comparison,
+    estimate_loop_bandwidth_from_psd_ratio,
+    detect_closed_loop_from_dm_commands,
+    find_status_runs,
+)
+
+
+def _filter_tip_tilt(commands, M2C):
+    TT_modes = np.linalg.pinv(M2C[:, :2])
+    TT_proj = commands @ TT_modes.T
+    TT_commands = TT_proj @ M2C[:, :2].T
+    return commands - TT_commands
 
 
 class Atmosphere_Characterization:
-    def __init__(self, file_name, batch_size, filter_TT):
+    """
+    Thin orchestrator around aott.atmosphere_characterization_tools: reads the
+    WFS group of an observation HDF5 file, batches the DM-command/WFS-
+    measurement telemetry per closed/open-loop run, calls the tools module's
+    estimators, and writes the results to WFS/Analysis/*. Does not implement
+    any atmosphere/AO-loop math itself -- see atmosphere_characterization_tools.py.
+
+    Closed-loop batches get the full characterization, from the DM-derived
+    Zernike modes (the loop's correction, a good proxy for the atmosphere it
+    is correcting): r0, L0, tau0, V0 (structure function), V0 (autocorrelation
+    cutoff), gain/delay (PSD transfer-function fit -- this fit's own wind
+    speed, V0_Zernike, was removed after being diagnosed as unreliable, see
+    estimate_wind_gain_delay_from_psd's docstring), the DM-vs-WFS PSD
+    comparison, and the model-free loop bandwidth.
+
+    Open-loop batches get none of that: with no active correction, a
+    closed-loop-calibrated reconstructor applied to the WFS's raw signal is
+    operating far outside the regime it was calibrated for (the WFS sees the
+    full, uncorrected wavefront, not a small residual), so r0/L0/tau0/V0/gain/
+    delay from open-loop WFS measurements are not trustworthy -- confirmed
+    directly on real telemetry (r0 came out ~15x too large). Open-loop batches
+    therefore only get the one thing that doesn't require that reconstruction
+    to be quantitatively accurate: the WFS-derived Zernike modes' own PSD,
+    which AnalysisViewer plots alongside the closed-loop PSD comparison.
+    """
+
+    def __init__(self, file_name, batch_duration=1.0, filter_TT=False,
+                 psd_comparison_modes=(0, 1, 2, 3), psd_nperseg=500, transition_buffer=20):
+        self.file_name = file_name
+        self.batch_duration = batch_duration
+        # Loop iterations skipped after each open/closed transition, so the
+        # loop has time to settle into the new regime (see find_status_runs).
+        self.transition_buffer = transition_buffer
+        self.filter_TT = filter_TT
+        self.psd_comparison_modes = np.asarray(psd_comparison_modes)
+        self.psd_nperseg = psd_nperseg
+
         with h5py.File(file_name, "r") as file:
-            self.file_name = file_name
-            self.batch_start = 0
-            self.batch_size = batch_size
-            self.number_of_frames = file['WFS']['DM_commands'].shape[0]
-            self.time_stamp = file['WFS']['DM_TimeStamps'][0]
-
-            self.filter_TT = filter_TT
-
-            self.gain = file['WFS'].attrs['Loop_Gain']
-            self.wavelength = file['Calibration'].attrs["AO_Calibration_Wavelength"]
-            self.freq = file['WFS'].attrs['Loop_Freq']
+            wfs_grp = file['WFS']
+            self.dm_commands = wfs_grp['DM_commands'][:]
+            self.dm_timestamps = wfs_grp['DM_TimeStamps'][:]
+            self.wfs_measurements = wfs_grp['WFS_measurements'][:].squeeze()
+            self.loop_gain = wfs_grp.attrs['Loop_Gain']
+            self.loop_leak = wfs_grp.attrs['Loop_Leak']
+            self.freq = wfs_grp.attrs['Loop_Freq']
             self.period = 1 / self.freq
-            self.loop_gain = file['WFS'].attrs['Loop_Gain']
-            self.loop_leak = file['WFS'].attrs['Loop_Leak']
-            
 
+            calibration_grp = file['Calibration']
+            self.wavelength = calibration_grp.attrs['AO_Calibration_Wavelength']
+            self.M2C = calibration_grp['M2C'][:]
+            self.Z2C = calibration_grp['Z2C'][:, :50]
+            self.C2Z = np.linalg.pinv(self.Z2C)
+            self.Diameter = calibration_grp.attrs['Diameter']
+            self.r0_reference_wvl = calibration_grp.attrs["r0_reference_wvl"]
 
-            self.dm_modes = file['Calibration']['DM_modes'][:] # / self.wavelength * 2 * np.pi
-            # self.Z_fullRes = file['Calibration']['Z_full_resolution']
-            self.M2C = file['Calibration']['M2C'][:]
-            self.C2Z = file['Calibration']['C2Z'][:]
-            self.Diameter = file['Calibration'].attrs['Diameter']
+        # batch_duration is a time window (seconds); convert to samples using
+        # this file's own loop rate, rather than hard-coding a frame count
+        # that silently means a different duration on a different-rate file.
+        self.batch_size = max(round(self.batch_duration * self.freq), 1)
 
-            self.nModes = 27
+        self.number_of_frames = self.dm_commands.shape[0]
+        self.is_closed_loop_per_sample = detect_closed_loop_from_dm_commands(self.dm_commands)
 
-            #self.Z = self.Z_fullRes[:self.nModes]
+    def _project_to_zernike(self, commands):
+        if self.filter_TT:
+            commands = _filter_tip_tilt(commands, self.M2C)
+        commands = commands - commands.mean(axis=1, keepdims=True)
+        return commands @ self.C2Z.T
 
-            
-        
-        # self.Z_flatten = self.Z.reshape(self.Z.shape[0], -1)
-        # self.Z_inv = np.linalg.pinv(self.Z_flatten, 0.05)
+    def _batch_timestamps(self, batch_start, batch_end):
+        # DM_TimeStamps can be coarser than one batch (e.g. a wall-clock stamp
+        # shared by many consecutive samples in simulated telemetry), which
+        # would make the derived sample period zero -- build the per-sample
+        # spacing from the authoritative Loop_Freq instead, anchored to this
+        # batch's real start time so Iteration_Times still records true
+        # wall-clock time.
+        batch_start_time = self.dm_timestamps[batch_start]
+        return batch_start_time + np.arange(batch_end - batch_start) * self.period
 
-        self.iteration_times = []
-        self.LoadData()
+    def _process_closed_batch(self, batch_start, batch_end):
+        dm_zernike = self._project_to_zernike(self.dm_commands[batch_start:batch_end])
+        wfs_zernike = self._project_to_zernike(self.wfs_measurements[batch_start:batch_end])
+        timestamps = self._batch_timestamps(batch_start, batch_end)
 
+        r0l0 = estimate_r0_L0(dm_zernike, self.Diameter, max_radial_order=8, min_radial_order=3)
+        tau0v0 = estimate_tau0_v0_structure_function(dm_zernike, timestamps, r0l0.r0)
+        autoc = estimate_wind_speed_autocorrelation_cutoff(dm_zernike, timestamps, self.Diameter, r0=r0l0.r0)
+        windgd = estimate_wind_gain_delay_from_psd(dm_zernike, timestamps, self.loop_leak)
+        psd_comparison = compute_zernike_psd_comparison(
+            dm_zernike, wfs_zernike, timestamps, self.psd_comparison_modes, nperseg=self.psd_nperseg)
+        loop_bandwidth = estimate_loop_bandwidth_from_psd_ratio(
+            dm_zernike, wfs_zernike, timestamps, nperseg=self.psd_nperseg)
+
+        return dict(
+            r0=r0l0.r0 * 100 * (self.r0_reference_wvl / self.wavelength) ** (6/5), L0=r0l0.L0, tau0=tau0v0.tau0 * 1000, V0=tau0v0.V0,
+            tau0_autocorrelation=(autoc.tau0 * 1000) if autoc.tau0 is not None else np.nan,
+            V0_autocorrelation=autoc.V0,
+            Effective_Gain=windgd.effective_gain,
+            Measured_Loop_Delay=windgd.effective_delay,
+            iteration_time=float(self.dm_timestamps[batch_start]),
+            psd_comparison=psd_comparison, loop_bandwidth=loop_bandwidth,
+        )
+
+    def _process_open_batch(self, batch_start, batch_end):
+        wfs_zernike = self._project_to_zernike(self.wfs_measurements[batch_start:batch_end])
+        timestamps = self._batch_timestamps(batch_start, batch_end)
+
+        psd = compute_zernike_psd(wfs_zernike, timestamps, self.psd_comparison_modes, nperseg=self.psd_nperseg)
+
+        return dict(iteration_time=float(self.dm_timestamps[batch_start]), psd=psd)
 
     def AnalyzeAllTheFile(self):
         print('#####################')
         print('Analysing AO Telemetry')
         print('#####################')
-        self.r0_list = []
-        self.tau0_list = []
-        self.V0_list = []
-        self.V0_Zernike_list = []
-        self.effective_gain_list = []
-        self.effective_delay_list = []
 
-        while (self.batch_start + self.batch_size) <= self.number_of_frames:
-            
-            self.ComputeAtmospericParameters(display=False)
-            self.ZernikeWindEstimation()
-            self.batch_start += self.batch_size // 2
-            self.LoadData()
-            self.r0_list.append(self.r0 * 100)
-            self.tau0_list.append(self.tau0 * 1000)
-            self.V0_list.append(self.V0)
-            self.V0_Zernike_list.append(self.zernike_wind_speed)
-            self.effective_gain_list.append(self.effective_gain)
-            self.effective_delay_list.append(self.effective_delay)
-            print(f'{self.batch_start} out of {self.number_of_frames} frames processed')
+        scalar_keys = [
+            "r0", "L0", "tau0", "V0", "Effective_Gain", "Measured_Loop_Delay",
+            "tau0_autocorrelation", "V0_autocorrelation", "iteration_time",
+        ]
+        closed_results = {k: [] for k in scalar_keys}
+        psd_comparisons = []
+        loop_bandwidths = []
+        open_psds = []
+        open_iteration_times = []
 
-        self.r0_list = np.array(self.r0_list)
-        self.tau0_list = np.array(self.tau0_list)
-        self.V0_list = np.array(self.V0_list)
-        self.V0_Zernike_list = np.array(self.V0_Zernike_list)
-        self.effective_gain_list = np.array(self.effective_gain_list)
-        self.effective_delay_list = np.array(self.effective_delay_list)
+        for run_start, run_end, is_closed in find_status_runs(self.is_closed_loop_per_sample,
+                                                              self.transition_buffer):
+            if run_end - run_start < self.batch_size:
+                continue
+            batch_start = run_start
+            while batch_start + self.batch_size <= run_end:
+                batch_end = batch_start + self.batch_size
+                if is_closed:
+                    entry = self._process_closed_batch(batch_start, batch_end)
+                    for k in scalar_keys:
+                        closed_results[k].append(entry[k])
+                    psd_comparisons.append(entry["psd_comparison"])
+                    loop_bandwidths.append(entry["loop_bandwidth"])
+                else:
+                    entry = self._process_open_batch(batch_start, batch_end)
+                    open_psds.append(entry["psd"])
+                    open_iteration_times.append(entry["iteration_time"])
+                batch_start += self.batch_size // 2
+                print(f'{batch_start} out of {self.number_of_frames} frames processed')
+
+        for k in scalar_keys:
+            closed_results[k] = np.array(closed_results[k])
+
+        self.results = closed_results
+        self.psd_comparisons = psd_comparisons
+        self.loop_bandwidths = loop_bandwidths
+        self.open_psds = open_psds
+        self.open_iteration_times = np.array(open_iteration_times)
 
         self.SaveAnalysis()
 
-    def LoadData(self):
-        with h5py.File(self.file_name, "r") as file:
-
-            self.dm_commands = file['WFS']['DM_commands'][self.batch_start:self.batch_start + self.batch_size]
-            # self.wfs_measurements = file['WFS']['WFS_measurements'][self.batch_start:self.batch_start + self.batch_size].squeeze()
-            # self.wfs_coefs = self.wfs_measurements @ self.M2C.T
-            # #POL
-            # self.dm_commands = self.dm_commands[2:] - self.wfs_coefs[:-2]
-
-            if self.filter_TT:
-                TT_modes = np.linalg.pinv(self.M2C[:,:2])
-                TT_proj = self.dm_commands @ TT_modes.T
-                TT_commands = TT_proj @ self.M2C[:,:2].T
-                self.dm_commands -= TT_commands
-            
-        
-        self.dm_commands = self.dm_commands
-        self.dm_commands -= self.dm_commands.mean(axis = 1, keepdims = True)
-
-        self.full_dm_map = np.tensordot(self.dm_commands, self.dm_modes, axes=(1, 0))
-        self.dm_flat = np.mean(self.full_dm_map, axis = 0)
-        self.full_dm_map -= np.expand_dims(self.dm_flat,0)
-        self.full_dm_map *= 2 * np.pi / self.wavelength
-
-        #self.dm_Z_modes = ProjectPhaseSeries(self.full_dm_map, self.Z_inv)
-        self.dm_Z_modes = self.dm_commands @ self.C2Z.T
-        self.iteration_times.append(self.time_stamp)
-        self.time_stamp += self.batch_size//2 *self.period
-
-    def RecreateDMCommandsFromWFS(self, startFromMode):
-        dm_commands_list = np.zeros_like(self.wfs_measurements)
-        dm_commands = np.zeros_like(self.wfs_measurements[0])
-
-
-        for i, signal in enumerate(self.wfs_measurements):
-            dm_commands = dm_commands * self.loop_leak - signal * self.loop_gain
-            dm_commands_list[i] = dm_commands
-
-        dm_commands_list = dm_commands_list.squeeze()
-        dm_commands_filtered = dm_commands_list[:, startFromMode:] @ self.M2C[:,startFromMode:].T
-
-
-        dm_commands_filtered = dm_commands_filtered
-        dm_commands_filtered -= dm_commands_filtered.mean(axis = 0, keepdims = True)
-
-        return dm_commands_filtered
-
-
-    def ComputeR0(self,display = False):
-        self.r0, self.L0 = ComputeR0L0(self.dm_Z_modes, self.Diameter, display = display)
-
-    def ComputeTau0(self, display = False):
-        estimated_lookahead = 3
-        self.D_tau = temporal_structure_function(self.full_dm_map,self.Diameter, estimated_lookahead)
-        while self.D_tau.max() < 2:
-            estimated_lookahead += 10
-            self.D_tau = temporal_structure_function(self.full_dm_map,self.Diameter, estimated_lookahead)
-
-        self.tau0 = ComputeCoherenceTime(np.array(self.D_tau)[None,:], self.period)
-
-        if display:
-            plt.figure()
-            T = np.arange(0,self.D_tau.shape[0]) * self.period
-            plt.plot(T, self.D_tau)
-            plt.plot([0, T.max()], [1, 1], 'k:')
-
-    def ComputeV0(self, display = False):
-        self.V0 = GetEstimatedAverageWindSpeedFittingStructureFunction(np.array([self.D_tau]), self.period, self.r0)[0]
-
-        if display:
-            plt.figure()
-            T = np.arange(0,self.D_tau.shape[0]) * self.period
-            plt.plot(T, self.D_tau)
-            plt.plot(T, PhaseTemporalStructureFunction(T, self.V0, self.r0))
-
-    def ComputeAtmospericParameters(self, display = False):
-        self.ComputeR0(display=display)
-        
-        self.ComputeTau0(display=display)
-        
-        self.ComputeV0(display = display)
-        
-
-        if display:
-            print(f'r0 = {self.r0 * 100:.1f} cm, L0 = {self.L0:.1f} m')
-            print(f'tau0 = {np.mean(self.tau0) * 1000:.2f} ms')
-            print(f'V0 = {np.mean(self.V0):.1f} m/s')
-    
-    def ZernikeWindEstimation(self):
-
-        radial_mode_arrays = RadialOrderArray(self.nModes)
-
-        self.zernike_wind_speed, self.effective_gain, self.effective_delay = GetEstimatedAverageWindspeedZernikeTemporalCutoff(self.dm_Z_modes, self.period, self.loop_leak, radial_mode_arrays, self.Diameter, display = False)
-
-        
     def SaveAnalysis(self):
         def write_or_replace(grp, name, data):
+            data = np.asarray(data)
             if name in grp:
                 dset = grp[name]
-                # overwrite only if shape is compatible
                 if dset.shape == data.shape:
                     dset[:] = data
                 else:
@@ -494,23 +191,73 @@ class Atmosphere_Characterization:
                     dset = grp.create_dataset(name, data=data)
             else:
                 dset = grp.create_dataset(name, data=data)
+            return dset
 
+        results = self.results
         with h5py.File(self.file_name, "a") as file:
             wfs_grp = file['WFS']
-            if "Analysis" not in wfs_grp:
-                analysis_grp = file['WFS'].create_group('Analysis')
-            else:
-                analysis_grp = wfs_grp['Analysis']
+            analysis_grp = wfs_grp.require_group('Analysis')
+            analysis_grp.attrs["Transition_Buffer_Frames"] = self.transition_buffer
 
-            write_or_replace(analysis_grp, "r0",   self.r0_list)
-            write_or_replace(analysis_grp, "tau0", self.tau0_list)
-            write_or_replace(analysis_grp, "V0",   self.V0_list)
-            write_or_replace(analysis_grp, "Iteration_Times", np.array(self.iteration_times))
+            # Migration from earlier schema versions: Batch_Is_Closed_Loop
+            # (interleaved open/closed batches in one array with this status
+            # flag -- the scalar arrays below are unconditionally closed-loop
+            # only now) and V0_Zernike (removed, see
+            # estimate_wind_gain_delay_from_psd's docstring for why) would
+            # otherwise linger as stale datasets from an older run.
+            for stale_key in ("Batch_Is_Closed_Loop", "V0_Zernike"):
+                if stale_key in analysis_grp:
+                    del analysis_grp[stale_key]
 
-            write_or_replace(analysis_grp, "V0_Zernike",   self.V0_Zernike_list)
-            write_or_replace(analysis_grp, "Effective_Gain", self.effective_gain_list)
-            write_or_replace(analysis_grp, "Measured_Loop_Delay",   self.effective_delay_list)
+            # Everything below (down to Loop_Bandwidth) is closed-loop batches
+            # only -- see the class docstring for why open loop doesn't get
+            # r0/L0/tau0/V0/gain/delay at all.
+            write_or_replace(analysis_grp, "r0", results["r0"])
+            analysis_grp["r0"].attrs["Units"] = "cm"
+            write_or_replace(analysis_grp, "L0", results["L0"])
+            analysis_grp["L0"].attrs["Units"] = "m"
+            write_or_replace(analysis_grp, "tau0", results["tau0"])
+            analysis_grp["tau0"].attrs["Units"] = "ms"
+            write_or_replace(analysis_grp, "V0", results["V0"])
+            analysis_grp["V0"].attrs["Units"] = "m/s"
+            write_or_replace(analysis_grp, "Effective_Gain", results["Effective_Gain"])
+            write_or_replace(analysis_grp, "Measured_Loop_Delay", results["Measured_Loop_Delay"])
+            analysis_grp["Measured_Loop_Delay"].attrs["Units"] = "frames"
+            write_or_replace(analysis_grp, "tau0_Autocorrelation", results["tau0_autocorrelation"])
+            analysis_grp["tau0_Autocorrelation"].attrs["Units"] = "ms"
+            write_or_replace(analysis_grp, "V0_Autocorrelation", results["V0_autocorrelation"])
+            analysis_grp["V0_Autocorrelation"].attrs["Units"] = "m/s"
+            write_or_replace(analysis_grp, "Iteration_Times", results["iteration_time"])
 
-            analysis_grp['r0'].attrs['Units'] = 'cm'
-            analysis_grp['tau0'].attrs['Units'] = 'ms'
-            analysis_grp['V0'].attrs['Units'] = 'm/s'
+            # Each optional sub-group is deleted, not just left un-updated,
+            # when this run produced nothing for it -- otherwise a re-run
+            # with different batching (e.g. no run long enough to fill a
+            # closed-loop batch this time) would leave a stale sub-group
+            # behind that no longer matches the file's other arrays.
+            if self.psd_comparisons:
+                psd_grp = analysis_grp.require_group("PSD_Comparison")
+                write_or_replace(psd_grp, "Modes", self.psd_comparisons[0].modes)
+                write_or_replace(psd_grp, "Frequency", self.psd_comparisons[0].frequency)
+                write_or_replace(psd_grp, "DM_PSD", np.array([p.dm_psd for p in self.psd_comparisons]))
+                write_or_replace(psd_grp, "WFS_PSD", np.array([p.wfs_psd for p in self.psd_comparisons]))
+                write_or_replace(psd_grp, "Iteration_Times", results["iteration_time"])
+            elif "PSD_Comparison" in analysis_grp:
+                del analysis_grp["PSD_Comparison"]
+
+            if self.loop_bandwidths:
+                bw_grp = analysis_grp.require_group("Loop_Bandwidth")
+                write_or_replace(bw_grp, "Radial_Orders", self.loop_bandwidths[0].radial_orders)
+                write_or_replace(bw_grp, "Crossover_Frequency",
+                                 np.array([b.crossover_frequency for b in self.loop_bandwidths]))
+                write_or_replace(bw_grp, "Iteration_Times", results["iteration_time"])
+            elif "Loop_Bandwidth" in analysis_grp:
+                del analysis_grp["Loop_Bandwidth"]
+
+            if self.open_psds:
+                ol_grp = analysis_grp.require_group("Open_Loop_PSD")
+                write_or_replace(ol_grp, "Modes", self.open_psds[0].modes)
+                write_or_replace(ol_grp, "Frequency", self.open_psds[0].frequency)
+                write_or_replace(ol_grp, "PSD", np.array([p.psd for p in self.open_psds]))
+                write_or_replace(ol_grp, "Iteration_Times", self.open_iteration_times)
+            elif "Open_Loop_PSD" in analysis_grp:
+                del analysis_grp["Open_Loop_PSD"]

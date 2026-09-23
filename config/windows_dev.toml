@@ -1,0 +1,46 @@
+# Data grabber configuration -- Windows dev copy.
+# Not read by any code: copy these values into data_grabber.toml to use them.
+# Only [output] is filled in: enough for aott/AutomaticAnalysis.py
+# to find hdf5_dir and report_dir when run locally on Windows, against the repo's
+# own test data instead of the observatory's /mnt/papydisk mount. The [shm]/
+# [acquisition]/[calibration] sections are left as "TODO" -- they're only
+# needed to actually grab telemetry with aott/telemetry.py on real hardware,
+# which doesn't happen on this machine.
+
+[shm.wfs]
+frames = "TODO"
+valid_pixel_map = "TODO"
+measurements = "TODO"
+fps = "TODO"
+gain = "TODO"
+
+[shm.dm]
+commands = "TODO"
+m2c = "TODO"
+
+[shm.loop]
+cmd = "TODO"
+gain = "TODO"
+leak = "TODO"
+
+[shm.science]
+frames = "TODO"
+dit = "TODO"
+fps = "TODO"
+gain = "TODO"
+
+[acquisition]
+semaphore = "TODO"
+wfs_frame_step = 1
+
+[calibration]
+dm_modes = "TODO"
+Z2C = "TODO"
+
+[output]
+# Relative to the repo root (AutomaticAnalysis.py is run from there). A
+# subfolder per date is looked for inside hdf5_dir; if it doesn't exist (as
+# with the flat data/ folder today), hdf5_dir itself is searched instead.
+hdf5_dir = "data"
+# A subfolder per date is created inside this one for each compiled report.
+report_dir = "AO reports"

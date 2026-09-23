@@ -1,10 +1,19 @@
-# Instrument configuration (template).
+# Instrument configuration, example values. Not read by any code: copy these values
+# into instrument.toml to use them.
 
 [instrument]
 # name of the AO system and of the telescope it is mounted on
 # Seen in code: "T152-Papyrus", a literal in AutomaticAnalysis.py (report title)
 name = "Example"
 telescope = "T1"
+
+[site]
+# geographic position of the observatory, used for the target elevation
+# Seen in code: 43.9308333 deg, 5.71333 deg, 650 m (Observatoire de Haute-Provence),
+# hard-coded in the former aott/GetStarData.py
+latitude_deg = 43.9308333
+longitude_deg = 5.71333
+height_m = 650
 
 [telescope]
 # pupil diameter [m]

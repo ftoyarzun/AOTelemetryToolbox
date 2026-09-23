@@ -1,0 +1,64 @@
+# Instrument configuration: the one instrument config of the project, edit it for the
+# instrument in use. Read by aott/telemetry.py and simulation/DataGeneration.ipynb
+# (aott.config.LoadInstrument), which refuse to start while a value is still "TODO".
+# example_instrument.toml holds filled-in example values to copy from.
+
+[instrument]
+# name of the AO system and of the telescope it is mounted on
+# Seen in code: "T152-Papyrus", a literal in AutomaticAnalysis.py (report title)
+name = "TODO"
+telescope = "TODO"
+
+[site]
+# geographic position of the observatory, used for the target elevation
+# Seen in code: 43.9308333 deg, 5.71333 deg, 650 m (Observatoire de Haute-Provence),
+# hard-coded in the former aott/GetStarData.py
+latitude_deg = "TODO"
+longitude_deg = "TODO"
+height_m = "TODO"
+
+[telescope]
+# pupil diameter [m]
+diameter_m = "TODO"
+# central obstruction as a diameter ratio [0-1]
+obstruction_ratio = "TODO"
+
+[dm]
+# total number of actuators
+n_actuators = "TODO"
+# number of actuators in the DM diameter
+actuators_in_diameter = "TODO"
+# ratio of the size of the on-sky pupil and the calibration pupil on the DM
+sky_calib_pupil_ratio = "TODO"
+
+[wfs]
+# wavefront sensor type
+type = "TODO"
+# wavelength the WFS operates at [nm]
+wvl_nm = "TODO"
+# wavelength the interaction matrix was calibrated at [nm]
+interaction_matrix_wvl_nm = "TODO"
+# number of lenslets across the pupil
+n_lenslets_across = "TODO"
+# readout noise [e-/pix]
+ron = "TODO"
+# is the camera an EMCCD
+emccd = "TODO"
+# modulation radius in units of lambda/DM
+modulation = "TODO"
+
+[science_camera]
+# central wavelength of the science filter [nm]
+wvl_nm = "TODO"
+# bandpass of the science filter [nm]
+bandpass_nm = "TODO"
+# wavelength the PSF sampling was calibrated at [nm]
+calibration_wvl_nm = "TODO"
+# pixels per lambda/D at the calibration wavelength, with the calibration pupil
+sampling_at_calibration = "TODO"
+# readout noise [e-/pix]
+ron = "TODO"
+
+[conventions]
+# wavelength that r0, tau0 and V0 are referred to in results and plot labels [nm]
+r0_reference_wvl_nm = "TODO"

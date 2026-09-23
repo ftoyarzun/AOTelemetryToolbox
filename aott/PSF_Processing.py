@@ -17,6 +17,8 @@ from scipy.ndimage import maximum_filter
 
 import h5py
 
+from aott.atmosphere_characterization_tools import detect_closed_loop_from_dm_commands, find_status_runs
+
 
 def Gaussian(ref_image, sampling):
     N = ref_image.shape[-1]
@@ -232,15 +234,13 @@ def get_otf(psf):
     otf = np.abs(fftshift(fft2(fftshift(psf / np.sum(psf)))))
     return otf/np.max(otf)
 
-def strehl_ratio(psf, sampling, is_sky):
+def strehl_ratio(psf, sampling):
     nx = psf.shape[0]
     x  = (np.arange(nx)-nx/2)*sampling/nx
     xx,yy = np.meshgrid(x,x)
     rr = np.sqrt(xx**2+yy**2)
-    if is_sky:
-        pup = np.where((rr<=0.5)*(rr>(0.27/2)), 1, 0)
-    else:
-        pup = np.where(rr<=0.5, 1, 0)
+
+    pup = np.where(rr<=0.5, 1, 0)
     pup_tf = fftshift(fft2(fftshift(pup))) / np.sum(pup)
     psf_diff = np.abs(pup_tf)**2
     otf_diff = get_otf(psf_diff)
@@ -251,24 +251,45 @@ def strehl_ratio(psf, sampling, is_sky):
 
 
 class PSF_Processing:
-    def __init__(self, file_name, batch_size):
+    def __init__(self, file_name, batch_duration=0.1, transition_buffer=20):
         self.file_name = file_name
         self.batch_start = 0
-        self.batch_size = batch_size
+        self.batch_duration = batch_duration
+        # Science frames skipped after each open/closed transition, so the
+        # PSF has time to settle into the new regime (see find_status_runs).
+        self.transition_buffer = transition_buffer
 
         with h5py.File(file_name, "r") as file:
             
-            self.is_closed_loop = True# file.attrs['Is_Closed_Loop']
-            science_grp = file['Science']
-            # self.target_name = science_grp.attrs['Target']
-            self.elevation = science_grp.attrs['Elevation']
-            self.time_stamps = science_grp.attrs['PSF_TimeStamps'][:]
 
-            self.is_sky = True
+            science_grp = file['Science']
+            dm_commands = file['WFS']['DM_commands'][:]
+            dm_timestamps = file['WFS']['DM_TimeStamps'][:]
+            frame_loop_status = detect_closed_loop_from_dm_commands(dm_commands)
+            self.target_name = science_grp.attrs['Target']
+            self.elevation = science_grp.attrs['Elevation']
+            # A dataset since telemetry.py, an attribute in older files
+            if 'PSF_TimeStamps' in science_grp:
+                self.time_stamps = science_grp['PSF_TimeStamps'][:]
+            else:
+                self.time_stamps = science_grp.attrs['PSF_TimeStamps'][:]
+
+            # Align the WFS/DM-cadence open/closed status to each Science frame
+            # by nearest timestamp -- the science camera and the WFS/DM loop
+            # are not guaranteed to run at the same rate or be frame-synchronous.
+            wfs_idx = np.searchsorted(dm_timestamps, self.time_stamps)
+            wfs_idx = np.clip(wfs_idx, 0, len(dm_timestamps) - 1)
+            self.frame_is_closed_loop = frame_loop_status[wfs_idx]
+
             science_frames_dset = science_grp['Science_PSFs']
             self.exposure_time = science_frames_dset.attrs['Exposure_Time']
             self.fps = science_frames_dset.attrs['FPS']
             self.period = 1 / self.fps
+            # batch_duration is a time window (seconds); convert to samples
+            # using this file's own frame rate, rather than hard-coding a
+            # frame count that silently means a different duration on a
+            # different-rate file.
+            self.batch_size = max(round(self.batch_duration * self.fps), 1)
             self.gain = science_frames_dset.attrs['Gain']
             self.sampling_calib = science_frames_dset.attrs['Sampling']
 
@@ -279,35 +300,35 @@ class PSF_Processing:
             self.SkyCalibPupilRatio = calibration_grp.attrs['SkyCalibPupilRatio']
             self.Diameter = calibration_grp.attrs['Diameter']
             self.Obstruction_ratio = calibration_grp.attrs['Obstruction_ratio']
-            
+            self.r0_reference_wvl = calibration_grp.attrs["r0_reference_wvl"]
             self.wvl_calib = calibration_grp.attrs['Science_Calibration_Wavelength']
             self.wvl_sky = science_frames_dset.attrs['Wavelength']
             self.instrument = Instrument(D=self.Diameter, 
                                          occ=self.Obstruction_ratio,
-                                         res = self.sampling_calib * self.wvl_calib / self.Diameter)
-
+                                         res = self.wvl_calib / self.Diameter / self.sampling_calib)
+            self.instrument.nact = round(self.actuators_in_dm_diameter * self.SkyCalibPupilRatio * np.sqrt(self.total_number_of_controlled_modes/self.total_number_of_actuators))
             self.rad2arcsec = 206265
 
-            self.nx = min(int(science_frames_dset.shape[-1]*0.9)//2*2, int((3 * self.sampling_calib / (self.wvl_sky / self.Diameter * self.rad2arcsec)) // 2) * 2)
+            
+
+            self.sampling = self.sampling_calib / self.SkyCalibPupilRatio * self.wvl_sky/self.wvl_calib
+            self.wvl = self.wvl_sky
+
+            self.nx = min(int(science_frames_dset.shape[-1]*0.7)//2*2, int((3 * self.instrument.nact / 2 * self.sampling) // 2) * 2)
             self.nx_cog = self.nx // 2
             self.cx = None
             self.cy = None
 
-            
-
-            self.dark = 0#science_grp['Dark'][:].squeeze().astype(np.float32)
             self.number_of_frames = file['Science']['Science_PSFs'].shape[0]
 
-            self.cogs_x = np.zeros(science_frames_dset.shape[0])
-            self.cogs_y = np.zeros(science_frames_dset.shape[0])
-
-            self.iteration_times = []
-            self.LoadData()
+            # NaN for frames never analysed (the transition buffer)
+            self.cogs_x = np.full(science_frames_dset.shape[0], np.nan)
+            self.cogs_y = np.full(science_frames_dset.shape[0], np.nan)
         
 
     def ComputeCenterOfGravity(self, display = False):
         
-        frames_in = (self.science_frames - np.expand_dims(self.dark,0))
+        frames_in = np.copy(self.science_frames)
         self.frames_in = frames_in[:, self.cy-self.nx_cog//2:self.cy+self.nx_cog//2,self.cx-self.nx_cog//2:self.cx+self.nx_cog//2]
 
         self.xcog, self.ycog = ComputeWCoG(self.frames_in, self.sampling)
@@ -351,67 +372,50 @@ class PSF_Processing:
 
         self.ComputeCoGPSD(display=True)
 
-    def LoadData(self):
+    def LoadData(self, start, size):
         with h5py.File(self.file_name, "r") as file:
-            self.science_frames = file['Science']['Science_PSFs'][self.batch_start:self.batch_start + self.batch_size].astype(np.float32)
-            self.time_stamp = self.time_stamps[self.batch_start + self.batch_size // 2]
+            self.science_frames = file['Science']['Science_PSFs'][start:start + size].astype(np.float32)
 
+        self.batch_start = start
+        self.time_stamp = self.time_stamps[start]
 
-    def ProcessDark(self):
-        # self.dead_pix_map = dead_pixel_map(self.dark)
-        # self.bkg_dp = filter_dead_pixel(self.dark, self.dead_pix_map)
-        self.bkg_dp = self.dark
 
     def ProcessPSF(self, psf):
         temp = np.copy(psf)
-        # img_dp = filter_dead_pixel(temp, self.dead_pix_map)
-        # post_processed_img = filter_dead_pixel_full_img(img_dp - self.bkg_dp)
-        post_processed_img = temp - self.dark
-        test, cx,cy = progressive_center_crop(post_processed_img, self.nx, step_sizes=None)
+        test, cx,cy = progressive_center_crop(temp, self.nx, step_sizes=None)
         return test, cx,cy
 
 
-    def SetSkyOrCalibContiditons(self):
-        if self.is_sky:
-            self.sampling = self.sampling_calib / self.SkyCalibPupilRatio * self.wvl_sky/self.wvl_calib
-            self.instrument.occ = 0.3
-            self.wvl = self.wvl_sky
-        else:
-            self.sampling = self.sampling_calib
-            self.instrument.occ = 0
-            self.wvl = self.wvl_calib
-
     def SetPSFModel(self):
-        nb_act_lin = self.actuators_in_dm_diameter
-        self.instrument.Nact = round(nb_act_lin * self.SkyCalibPupilRatio * np.sqrt(self.total_number_of_controlled_modes/self.total_number_of_actuators))
-
-        if self.is_closed_loop:
-            self.psfmodel = Psfao((self.nx,self.nx), system=self.instrument, samp=self.sampling)
-            self.psfparam_guess = [0.09, 1e-4, 0.4, 0.5, 1, 0, 1.5]
-            self.fixed = [False, ]*7
-        else:
-            self.psfmodel = Turbulent((self.nx,self.nx), system=self.instrument, samp=self.sampling)
-            self.psfparam_guess = [0.09, 30]
-            self.fixed = [False, ]*2
+        # Both models are built unconditionally, keyed by loop status, since a
+        # file can mix open- and closed-loop batches -- selected per batch in
+        # FitPSFModel instead of once for the whole file.
+        self.psf_models = {
+            True: (Psfao((self.nx, self.nx), system=self.instrument, samp=self.sampling),
+                   [0.09, 1e-4, 0.4, 0.5, 1, 0, 1.5], [False] * 7),
+            False: (Turbulent((self.nx, self.nx), system=self.instrument, samp=self.sampling),
+                    [0.09, 30], [False] * 2),
+        }
 
 
-    def ProcessPSFBatch(self):
+    def ProcessPSFBatch(self, is_closed_loop):
 
-        self.long_exp = np.mean(self.science_frames, axis = 0)     
+        self.long_exp = np.mean(self.science_frames, axis = 0)
         self.long_exp, cx, cy = self.ProcessPSF(self.long_exp)
 
-        if self.cx is None: 
+        if self.cx is None:
             self.cx = cx
             self.cy = cy
 
         self.ComputeCenterOfGravity()
 
-        self.cogs_x[self.batch_start:self.batch_start + self.batch_size] = self.xcog
-        self.cogs_y[self.batch_start:self.batch_start + self.batch_size] = self.ycog
+        n = self.science_frames.shape[0]
+        self.cogs_x[self.batch_start:self.batch_start + n] = self.xcog
+        self.cogs_y[self.batch_start:self.batch_start + n] = self.ycog
 
-        self.jitter.append([np.std(self.xcog), np.std(self.ycog)])
+        self.batch_jitter = [np.std(self.xcog), np.std(self.ycog)]
 
-        r0, sr_otf, sr_fit, psf_norm, psf_model, dxdy = self.FitPSFModel(self.long_exp)
+        r0, sr_otf, sr_fit, psf_norm, psf_model, dxdy = self.FitPSFModel(self.long_exp, is_closed_loop)
 
         self.long_exp_r0 = r0
         self.long_exp_sr_otf = sr_otf
@@ -423,61 +427,87 @@ class PSF_Processing:
         print('#####################')
         print('Analysing PSFs')
         print('#####################')
-        self.long_exp_r0_list = []
-        self.long_exp_sr_otf_list = []
-        self.long_exp_sr_fit_list = []
-        self.long_exp_psf_norm_list = []
-        self.long_exp_psf_model_list = []
-        self.jitter = []
+        closed_r0, closed_sr_otf, closed_sr_fit, closed_psf_norm, closed_psf_model = [], [], [], [], []
+        closed_jitter, closed_times = [], []
+        open_r0, open_psf_norm, open_psf_model, open_jitter, open_times = [], [], [], [], []
 
-        while (self.batch_start + self.batch_size) <= self.number_of_frames:
-            
-            self.ProcessPSFBatch()
-            self.batch_start += self.batch_size
-            self.LoadData()
-            self.long_exp_r0_list.append(self.long_exp_r0)
-            self.long_exp_sr_otf_list.append(self.long_exp_sr_otf)
-            self.long_exp_sr_fit_list.append(self.long_exp_sr_fit)
-            self.long_exp_psf_norm_list.append(self.long_exp_psf_norm)
-            self.long_exp_psf_model_list.append(self.long_exp_psf_model)
-            print(f'{self.batch_start} out of {self.number_of_frames} frames processed')
+        for run_start, run_end, is_closed in find_status_runs(self.frame_is_closed_loop, self.transition_buffer):
+            start = run_start
+            while start < run_end:
+                size = min(self.batch_size, run_end - start)
+                self.LoadData(start, size)
+                self.ProcessPSFBatch(is_closed)
+                if is_closed:
+                    closed_r0.append(self.long_exp_r0)
+                    closed_sr_otf.append(self.long_exp_sr_otf)
+                    closed_sr_fit.append(self.long_exp_sr_fit)
+                    closed_psf_norm.append(self.long_exp_psf_norm)
+                    closed_psf_model.append(self.long_exp_psf_model)
+                    closed_jitter.append(self.batch_jitter)
+                    closed_times.append(self.time_stamp)
+                else:
+                    open_r0.append(self.long_exp_r0)
+                    open_psf_norm.append(self.long_exp_psf_norm)
+                    open_psf_model.append(self.long_exp_psf_model)
+                    open_jitter.append(self.batch_jitter)
+                    open_times.append(self.time_stamp)
+                start += size
+                print(f'{start} out of {self.number_of_frames} frames processed')
 
+        # Reshape explicitly so an empty regime still yields an array with the
+        # right number of dimensions (e.g. (0, nx, nx) rather than a bare
+        # (0,)) instead of just an empty flat array -- AnalysisViewer and any
+        # later re-run's shape-compatibility check both rely on this.
+        self.long_exp_r0_list = np.array(closed_r0)
+        self.long_exp_sr_otf_list = np.array(closed_sr_otf)
+        self.long_exp_sr_fit_list = np.array(closed_sr_fit)
+        self.long_exp_psf_norm_list = np.array(closed_psf_norm).reshape(-1, self.nx, self.nx)
+        self.long_exp_psf_model_list = np.array(closed_psf_model).reshape(-1, self.nx, self.nx)
+        self.jitter = np.array(closed_jitter, dtype=float).reshape(-1, 2)
+        self.iteration_times = closed_times
 
-        self.long_exp_r0_list = np.array(self.long_exp_r0_list)
-        self.long_exp_sr_otf_list = np.array(self.long_exp_sr_otf_list)
-        self.long_exp_sr_fit_list = np.array(self.long_exp_sr_fit_list)
-        self.long_exp_psf_norm_list = np.array(self.long_exp_psf_norm_list)
-        self.long_exp_psf_model_list = np.array(self.long_exp_psf_model_list)
-        self.jitter = np.array(self.jitter)
+        self.open_loop_r0_list = np.array(open_r0)
+        self.open_loop_psf_norm_list = np.array(open_psf_norm).reshape(-1, self.nx, self.nx)
+        self.open_loop_psf_model_list = np.array(open_psf_model).reshape(-1, self.nx, self.nx)
+        self.open_loop_jitter = np.array(open_jitter, dtype=float).reshape(-1, 2)
+        self.open_loop_iteration_times = open_times
 
         self.SaveAnalysis()
 
 
-    def FitPSFModel(self, psf, display = False):
+    def FitPSFModel(self, psf, is_closed_loop, display = False):
+        psfmodel, psfparam_guess, fixed = self.psf_models[is_closed_loop]
+
         ron = 0
-        weights = 1/(gaussian_filter(np.abs(psf), 2)+ron**2)
-        out = psffit(psf, self.psfmodel, self.psfparam_guess, weights=weights, fixed=self.fixed, max_nfev=30)
+        weights = None# 1/(gaussian_filter(np.abs(psf), 2)+ron**2)
+        out = psffit(psf, psfmodel, psfparam_guess, weights=weights, fixed=fixed, max_nfev=60)
         otf_fit_avg = circavg(get_otf(out.psf), center=(self.nx//2,self.nx//2))
 
         psf_norm = (psf-out.flux_bck[1])/out.flux_bck[0]
 
         otf = get_otf(psf_norm)
         otf_avg = circavg(otf, center=(self.nx//2,self.nx//2))
-        sr, otf_diff = strehl_ratio(psf_norm, self.sampling, self.is_sky)
-        otf_diff_avg = circavg(otf_diff, center=(self.nx//2,self.nx//2))
 
-        r0_zenith = out.x[0]/np.cos(np.pi/2-self.elevation*np.pi/180)**(3/5)
-        r0_V0 = r0_zenith * (550e-9 / self.wvl) ** (6/5)
-        seeing = self.rad2arcsec*550e-9/r0_V0
+        r0 = out.x[0]#/np.cos(np.pi/2-self.elevation*np.pi/180)**(3/5)
+        r0_V0 = r0 * (self.r0_reference_wvl / self.wvl) ** (6/5)
+        seeing = self.rad2arcsec*self.r0_reference_wvl/r0_V0
 
-        sr_OTF = 100*sr
-        sr_fit = 100*self.psfmodel.strehlOTF(out.x)
+        # Strehl only has meaning for the closed-loop, AO-corrected model --
+        # an open-loop batch only ever needs r0/seeing.
+        if is_closed_loop:
+            sr, otf_diff = strehl_ratio(psf_norm, self.sampling)
+            otf_diff_avg = circavg(otf_diff, center=(self.nx//2,self.nx//2))
+            sr_OTF = 100*sr
+            sr_fit = 100*psfmodel.strehlOTF(out.x)
+        else:
+            sr_OTF = np.nan
+            sr_fit = np.nan
 
         if display:
 
-
-            print('Strehl : %.1f %% (from OTF)'%(100*sr))
-            print('Strehl : %.1f %% (from fit)'%(100*self.psfmodel.strehlOTF(out.x)))
+            if is_closed_loop:
+                print('Strehl : %.1f %% (from OTF)'%(sr_OTF))
+                print('Strehl : %.1f %% (from fit)'%(sr_fit))
             print('r0 @ 550 nm : %.2f cm'%(r0_V0 * 100))
 
             
@@ -488,7 +518,7 @@ class PSF_Processing:
                 maxi = np.max(psf_norm)
                 im1 = plt.imshow(tab/maxi, norm=norm, cmap=cmap, extent=[axis[0],axis[-1],axis[0],axis[-1]])
                 plt.colorbar(im1, fraction=0.046, pad=0.04)
-                corr_zone = Circle([0,0], self.wvl/self.Diameter*self.instrument.Nact/2*self.rad2arcsec, fc='none', ec='k', ls=':')
+                corr_zone = Circle([0,0], self.wvl/self.Diameter*self.instrument.nact/2*self.rad2arcsec, fc='none', ec='k', ls=':')
                 plt.gca().add_artist(corr_zone)
                 plt.xlabel('[arcsec]')
                 plt.ylabel('[arcsec]')
@@ -517,15 +547,16 @@ class PSF_Processing:
             
             plt.figure(2, figsize=(8,4))
             plt.clf()
-            plt.suptitle(f'Strehl = {100*self.psfmodel.strehlOTF(out.x):.1f}%    Seeing = {seeing:.1f}"')
+            title = f'Seeing = {seeing:.1f}"' if not is_closed_loop else f'Strehl = {sr_fit:.1f}%    Seeing = {seeing:.1f}"'
+            plt.suptitle(title)
 
             plt.subplot(121)
             plt.title('PSF')
-            plt.semilogy(circavg(self.psfmodel.psfDiffraction, center=(self.nx//2,self.nx//2)), label='diffraction', c='k')
+            plt.semilogy(circavg(psfmodel.psfDiffraction, center=(self.nx//2,self.nx//2)), label='diffraction', c='k')
             plt.semilogy(circavg(psf_norm, center=(self.nx//2,self.nx//2)), label='data')
             plt.semilogy(circavg(out.psf, center=(self.nx//2,self.nx//2)), label='fit')
             plt.axhline(out.flux_bck[1]/out.flux_bck[0], c='C1', ls='--', label='bck fit')
-            plt.axvline(self.instrument.Nact/2*self.sampling, c='k', ls=':', label='AO')
+            plt.axvline(self.instrument.nact/2*self.sampling, c='k', ls=':', label='AO')
             plt.grid()
             plt.xlim(0, 60)
             plt.ylim(1e-7, 0.1)
@@ -534,7 +565,8 @@ class PSF_Processing:
 
             plt.subplot(122)
             plt.title('OTF')
-            plt.loglog(otf_diff_avg, label='diffraction', c='k')
+            if is_closed_loop:
+                plt.loglog(otf_diff_avg, label='diffraction', c='k')
             plt.loglog(otf_avg, label='data')
             plt.loglog(otf_fit_avg, label='fit')
             plt.xlabel('Frequency [1/pix]')
@@ -567,16 +599,24 @@ class PSF_Processing:
 
 
             sci_grp = file['Science']
-            
+
             analysis_grp = write_or_replace_group(sci_grp, 'Analysis')
             analysis_grp_se = write_or_replace_group(analysis_grp, 'Short_Exposure')
             analysis_grp_le = write_or_replace_group(analysis_grp, 'Long_Exposure')
+            analysis_grp_le_ol = write_or_replace_group(analysis_grp, 'Long_Exposure_OpenLoop')
 
 
             write_or_replace(analysis_grp_se,'CoG-X', data = self.cogs_x)
             write_or_replace(analysis_grp_se,'CoG-Y', data = self.cogs_y)
+            write_or_replace(analysis_grp_se,'Is_Closed_Loop', data = self.frame_is_closed_loop)
+            analysis_grp_se.attrs['Transition_Buffer_Frames'] = self.transition_buffer
+            # Jitter is one entry per PSF batch, same cadence as Long_Exposure/
+            # Long_Exposure_OpenLoop -- split the same way, and read each
+            # regime's own Iteration_Times there instead of duplicating a
+            # third copy here.
             write_or_replace(analysis_grp_se,'Jitter', data = self.jitter)
-            
+            write_or_replace(analysis_grp_se,'Jitter_OpenLoop', data = self.open_loop_jitter)
+
 
             write_or_replace(analysis_grp_le,'r0', data = self.long_exp_r0_list)
             write_or_replace(analysis_grp_le,'sr_otf', data = self.long_exp_sr_otf_list)
@@ -584,3 +624,8 @@ class PSF_Processing:
             write_or_replace(analysis_grp_le,'psf_stack', data = self.long_exp_psf_norm_list)
             write_or_replace(analysis_grp_le,'psf_model', data = self.long_exp_psf_model_list)
             write_or_replace(analysis_grp_le, "Iteration_Times", np.array(self.iteration_times))
+
+            write_or_replace(analysis_grp_le_ol,'r0', data = self.open_loop_r0_list)
+            write_or_replace(analysis_grp_le_ol,'psf_stack', data = self.open_loop_psf_norm_list)
+            write_or_replace(analysis_grp_le_ol,'psf_model', data = self.open_loop_psf_model_list)
+            write_or_replace(analysis_grp_le_ol, "Iteration_Times", np.array(self.open_loop_iteration_times))

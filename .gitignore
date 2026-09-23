@@ -220,6 +220,9 @@ __marimo__/
 
 # Folders
 papers/
+data/
+plans/
+class reports/
 
 # Claude
 .claude
@@ -228,3 +231,9 @@ CLAUDE.md
 # Data
 .hdf5
 .pth
+*.png
+
+# Generated reports
+AO reports/
+report_data.json
+nightly_report_data.json
