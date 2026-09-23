@@ -1,7 +1,6 @@
 from aott.PSF_Processing import PSF_Processing
 from aott.Atmosphere_Characterization import Atmosphere_Characterization
 from aott.AnalysisViewer import AnalysisViewer
-from aott.AllSkyCamGrabber import GrabAllSkyFrame
 from aott.config import DATA_GRABBER_FILE
 from pathlib import Path
 import subprocess

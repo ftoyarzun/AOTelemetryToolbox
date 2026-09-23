@@ -29,7 +29,6 @@ REQUIRED_KEYS = [
     "shm.science.fps",
     "shm.science.gain",
     "acquisition.semaphore",
-    "calibration.dm_modes",
     "calibration.Z2C",
     "output.hdf5_dir",
     "output.report_dir",

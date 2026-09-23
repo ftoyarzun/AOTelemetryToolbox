@@ -146,11 +146,6 @@ def main():
     m2c = ActuatorsFirst(dao.shm(shm_paths["dm"]["m2c"]).get_data(), n_act, "shm.dm.m2c")
     z2c = ActuatorsFirst(LoadArray(config["calibration"]["Z2C"]), n_act, "calibration.Z2C")
 
-    # The measurements stream holds modal coefficients, the analysis wants DM commands
-    n_measured_modes = wfs_measurements_shm.get_data().size
-    if n_measured_modes > m2c.shape[1]:
-        sys.exit(f"shm.wfs.measurements has {n_measured_modes} modes, more than the {m2c.shape[1]} of shm.dm.m2c")
-
     optional = {}
     for key, path in config["calibration"].items():
         if key in OPTIONAL_ARRAYS and path != "TODO":
@@ -158,7 +153,7 @@ def main():
 
     wfs_rec, psf_rec = RecordInParallel(
         [
-            [Stream(dm_shm), Stream(wfs_frames_shm, keep_every=wfs_frame_step), Stream(wfs_measurements_shm),
+            [Stream(wfs_frames_shm, keep_every=wfs_frame_step), Stream(dm_shm), Stream(wfs_measurements_shm),
              Stream(loop_cmd_shm)],
             [Stream(psf_shm, window=psf_window)],
         ],
@@ -169,9 +164,8 @@ def main():
     print(f"WFS Camera: {len(wfs_rec.timestamps)} frames")
     print(f"PSF Camera: {len(psf_rec.timestamps)} frames")
 
-    dm_commands, wfs_frames, modal_measurements, loop_status = wfs_rec.data
+    wfs_frames, dm_commands, wfs_measurements, loop_status = wfs_rec.data
     (psf_frames,) = psf_rec.data
-    wfs_measurements = modal_measurements @ m2c[:, :n_measured_modes].T
 
     start_time = min(wfs_rec.timestamps[0], psf_rec.timestamps[0])
     start = datetime.datetime.fromtimestamp(start_time, tz=datetime.timezone.utc)
@@ -207,7 +201,6 @@ def main():
         grp_wfs.create_dataset("DM_commands", data=dm_commands)
         grp_wfs.create_dataset("DM_TimeStamps", data=wfs_rec.timestamps)
         grp_wfs.create_dataset("WFS_measurements", data=wfs_measurements)
-        grp_wfs.create_dataset("WFS_Modal_Measurements", data=modal_measurements)
         # Loop command at every loop iteration. The notebook stores it as the loop_status attribute,
         # a dataset here because attributes are limited to 64 kB. The analysis derives the
         # open/closed status from the DM commands and doesn't read it.
