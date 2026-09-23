@@ -58,8 +58,6 @@ wfs_frame_step = 1
 
 [calibration]
 # Each value is either a .npy file or a dao .im.shm file, read once.
-# DM influence functions, saved as Calibration/DM_modes, (n_act, res, res) or (res*res, n_act)
-dm_modes = "TODO"
 # Zernike to DM commands matrix, saved as Calibration/Z2C, (n_act, n_zernike) either way round
 Z2C = "TODO"
 

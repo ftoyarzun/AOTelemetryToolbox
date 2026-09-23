@@ -34,7 +34,6 @@ y = [400, 800]
 x = [800, 1200]
 
 [calibration]
-dm_modes = "/home/rama/rama-dev/foyarzun/CNN/Data/DM_IF.npy"
 Z2C = "/home/rama/rama-dev/foyarzun/CNN/Data/Z2C.npy"
 
 [output]

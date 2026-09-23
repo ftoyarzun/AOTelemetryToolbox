@@ -91,22 +91,6 @@ def ActuatorsFirst(matrix, n_act, name):
     sys.exit(f"{name}: can't tell which axis holds the {n_act} DM actuators in shape {matrix.shape}")
 
 
-def DMModesCube(modes, n_act):
-    """DM influence functions as (n_act, res, res), from (n_act, res, res), (res, res, n_act) or a 2-D (res*res, n_act) either way round."""
-    modes = np.asarray(modes).squeeze()
-    if modes.ndim == 2:
-        modes = ActuatorsFirst(modes, n_act, "calibration.dm_modes")
-        res = math.isqrt(modes.shape[1])
-        if res * res == modes.shape[1]:
-            return modes.reshape(n_act, res, res)
-    elif modes.ndim == 3:
-        first = modes.shape[0] == n_act and modes.shape[1] == modes.shape[2]
-        last = modes.shape[2] == n_act and modes.shape[0] == modes.shape[1]
-        if first != last:
-            return modes if first else np.moveaxis(modes, -1, 0)
-    sys.exit(f"calibration.dm_modes: can't read shape {modes.shape} as {n_act} square influence functions")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Grab telemetry and PSFs and write the observation HDF5 file.")
     parser.add_argument("target", type=str, help="name of the target, as SIMBAD knows it")
@@ -161,7 +145,6 @@ def main():
 
     m2c = ActuatorsFirst(dao.shm(shm_paths["dm"]["m2c"]).get_data(), n_act, "shm.dm.m2c")
     z2c = ActuatorsFirst(LoadArray(config["calibration"]["Z2C"]), n_act, "calibration.Z2C")
-    dm_modes = DMModesCube(LoadArray(config["calibration"]["dm_modes"]), n_act)
 
     # The measurements stream holds modal coefficients, the analysis wants DM commands
     n_measured_modes = wfs_measurements_shm.get_data().size
@@ -258,7 +241,6 @@ def main():
         grp_calibration = file.create_group("Calibration")
         grp_calibration.create_dataset("M2C", data=m2c)
         grp_calibration.create_dataset("Z2C", data=z2c)
-        grp_calibration.create_dataset("DM_modes", data=dm_modes)
         grp_calibration.attrs["Diameter"] = instrument["telescope"]["diameter_m"]
         grp_calibration.attrs["Obstruction_ratio"] = instrument["telescope"]["obstruction_ratio"]
         grp_calibration.attrs["Science_Calibration_Wavelength"] = science_camera["calibration_wvl_nm"] * 1e-9
