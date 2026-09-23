@@ -32,24 +32,22 @@ class Atmosphere_Characterization:
     Closed-loop batches get the full characterization, from the DM-derived
     Zernike modes (the loop's correction, a good proxy for the atmosphere it
     is correcting): r0, L0, tau0, V0 (structure function), V0 (autocorrelation
-    cutoff), gain/delay (PSD transfer-function fit -- this fit's own wind
-    speed, V0_Zernike, was removed after being diagnosed as unreliable, see
-    estimate_wind_gain_delay_from_psd's docstring), the DM-vs-WFS PSD
+    cutoff), gain/delay (PSD transfer-function fit), the DM-vs-WFS PSD
     comparison, and the model-free loop bandwidth.
 
     Open-loop batches get none of that: with no active correction, a
     closed-loop-calibrated reconstructor applied to the WFS's raw signal is
     operating far outside the regime it was calibrated for (the WFS sees the
     full, uncorrected wavefront, not a small residual), so r0/L0/tau0/V0/gain/
-    delay from open-loop WFS measurements are not trustworthy -- confirmed
-    directly on real telemetry (r0 came out ~15x too large). Open-loop batches
-    therefore only get the one thing that doesn't require that reconstruction
-    to be quantitatively accurate: the WFS-derived Zernike modes' own PSD,
+    delay from open-loop WFS measurements are not trustworthy (on real
+    telemetry, r0 came out ~15x too large). Open-loop batches therefore only
+    get the one thing that doesn't require that reconstruction to be
+    quantitatively accurate: the WFS-derived Zernike modes' own PSD,
     which AnalysisViewer plots alongside the closed-loop PSD comparison.
     """
 
-    def __init__(self, file_name, batch_duration=1.0, filter_TT=False,
-                 psd_comparison_modes=(0, 1, 2, 3), psd_nperseg=500, transition_buffer=20):
+    def __init__(self, file_name, batch_duration=4.0, filter_TT=False,
+                 psd_comparison_modes=(0, 1, 2, 3), psd_nperseg=500, transition_buffer=10):
         self.file_name = file_name
         self.batch_duration = batch_duration
         # Loop iterations skipped after each open/closed transition, so the
@@ -77,9 +75,7 @@ class Atmosphere_Characterization:
             self.Diameter = calibration_grp.attrs['Diameter']
             self.r0_reference_wvl = calibration_grp.attrs["r0_reference_wvl"]
 
-        # batch_duration is a time window (seconds); convert to samples using
-        # this file's own loop rate, rather than hard-coding a frame count
-        # that silently means a different duration on a different-rate file.
+        # batch_duration is in seconds
         self.batch_size = max(round(self.batch_duration * self.freq), 1)
 
         self.number_of_frames = self.dm_commands.shape[0]
@@ -199,16 +195,6 @@ class Atmosphere_Characterization:
             analysis_grp = wfs_grp.require_group('Analysis')
             analysis_grp.attrs["Transition_Buffer_Frames"] = self.transition_buffer
 
-            # Migration from earlier schema versions: Batch_Is_Closed_Loop
-            # (interleaved open/closed batches in one array with this status
-            # flag -- the scalar arrays below are unconditionally closed-loop
-            # only now) and V0_Zernike (removed, see
-            # estimate_wind_gain_delay_from_psd's docstring for why) would
-            # otherwise linger as stale datasets from an older run.
-            for stale_key in ("Batch_Is_Closed_Loop", "V0_Zernike"):
-                if stale_key in analysis_grp:
-                    del analysis_grp[stale_key]
-
             # Everything below (down to Loop_Bandwidth) is closed-loop batches
             # only -- see the class docstring for why open loop doesn't get
             # r0/L0/tau0/V0/gain/delay at all.
@@ -229,11 +215,8 @@ class Atmosphere_Characterization:
             analysis_grp["V0_Autocorrelation"].attrs["Units"] = "m/s"
             write_or_replace(analysis_grp, "Iteration_Times", results["iteration_time"])
 
-            # Each optional sub-group is deleted, not just left un-updated,
-            # when this run produced nothing for it -- otherwise a re-run
-            # with different batching (e.g. no run long enough to fill a
-            # closed-loop batch this time) would leave a stale sub-group
-            # behind that no longer matches the file's other arrays.
+            # An optional sub-group this run produced nothing for is deleted,
+            # so a re-run with different batching never leaves a stale one.
             if self.psd_comparisons:
                 psd_grp = analysis_grp.require_group("PSD_Comparison")
                 write_or_replace(psd_grp, "Modes", self.psd_comparisons[0].modes)

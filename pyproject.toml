@@ -16,22 +16,21 @@ requires-python = ">=3.10"
 #   dao    Real-time AO shared-memory library. Only aott/telemetry.py needs it, and only on
 #          the observatory machine. There is no "dao" on PyPI, so install it from the
 #          observatory's own source.
-#   typst  Command-line tool that compiles ao_report.typ. AutomaticAnalysis.py and
-#          telemetry.py call it with subprocess, so it must be on PATH.
+#   typst  Command-line tool that compiles the reports. AutomaticAnalysis.py and
+#          NightlyReport.py call it with subprocess, so it must be on PATH.
 #   OOPAO  AO simulator. It can be installed from https://github.com/cheritier/OOPAO
 dependencies = [
     "h5py",
     "numpy",
     "scipy",
     "matplotlib",  # also provides pylab, which most modules import
-    "astropy",  # astropy.io.fits reads the science camera cubes
+    "astropy",  # target coordinates and elevation in telemetry.py
     "maoppy",  # PSF fitting; its data folder holds the papyrus instrument definition
-    "requests",  # AllSkyCamGrabber
-    "tomli; python_version < '3.11'",  # tomllib backport, used by DataGrabber
-    "astroquery",
+    "tomli; python_version < '3.11'",  # tomllib backport, for the config files
+    "astroquery",  # SIMBAD query in telemetry.py
 ]
 
-# The package is imported as "aott" (from aott import PSF_Processing). For prototyping, install
+# The package is imported as "aott" (from aott.PSF_Processing import PSF_Processing). For prototyping, install
 # it in editable mode (pip install -e .) so that edits in aott/ show up without reinstalling.
 [tool.setuptools]
 packages = ["aott"]

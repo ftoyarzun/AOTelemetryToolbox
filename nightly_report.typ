@@ -110,7 +110,7 @@
 
 = Observed Targets
 
-Per target: median of the per-observation medians; the small numbers underneath are the interquartile range across observations. SF: structure function, AC: autocorrelation, CL: closed loop, OL: open loop.
+Per target: median of the per-observation medians; the small numbers underneath are the interquartile range across observations. SF: structure function, AC: autocorrelation, FF: frozen-flow profiler, CL: closed loop, OL: open loop.
 
 == Targets and Magnitudes
 #target-table(
@@ -121,9 +121,10 @@ Per target: median of the per-observation medians; the small numbers underneath 
 == Atmospheric Conditions
 #target-table(
   ([$r_0$ telemetry (cm)], [$r_0$ PSF, CL (cm)], [$r_0$ PSF, OL (cm)], [$L_0$ (m)],
-   [$tau_0$ SF (ms)], [$tau_0$ AC (ms)], [$V_0$ SF (m/s)], [$V_0$ AC (m/s)]),
+   [$tau_0$ SF (ms)], [$tau_0$ AC (ms)], [$tau_0$ FF (ms)], [$V_0$ SF (m/s)], [$V_0$ AC (m/s)], [$V_0$ FF (m/s)]),
   t => ("r0_wfs", "r0_psf_closed", "r0_psf_open", "L0",
-        "tau0", "tau0_autocorrelation", "V0", "V0_autocorrelation").map(k => summary-cell(t, k)),
+        "tau0", "tau0_autocorrelation", "tau0_frozen_flow", "V0", "V0_autocorrelation",
+        "V0_frozen_flow").map(k => summary-cell(t, k)),
 )
 
 == Strehl Ratio and Jitter

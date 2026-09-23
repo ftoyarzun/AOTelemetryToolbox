@@ -130,6 +130,7 @@ def main():
     # Static values, read once. The calibration arrays are checked against the DM
     # command size here, so a wrong file stops the script before the acquisition.
     wfs_pup = dao.shm(shm_paths["wfs"]["valid_pixel_map"]).get_data()
+    dm_map = dao.shm(shm_paths["dm"]["dm_map"]).get_data()
     loop_gain = dao.shm(shm_paths["loop"]["gain"]).get_data()[0, 0]
     loop_leak = dao.shm(shm_paths["loop"]["leak"]).get_data()[0, 0]
     wfs_fps = dao.shm(shm_paths["wfs"]["fps"]).get_data()[0, 0]
@@ -198,6 +199,7 @@ def main():
         grp_wfs.create_dataset("WFS_TimeStamps", data=wfs_rec.timestamps[::wfs_frame_step])
 
         grp_wfs.create_dataset("Valid_Pixel_Map", data=wfs_pup)
+        grp_wfs.create_dataset("DM_Map", data=dm_map)
         grp_wfs.create_dataset("DM_commands", data=dm_commands)
         grp_wfs.create_dataset("DM_TimeStamps", data=wfs_rec.timestamps)
         grp_wfs.create_dataset("WFS_measurements", data=wfs_measurements)

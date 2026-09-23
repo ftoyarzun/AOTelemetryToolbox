@@ -22,8 +22,7 @@ Interface conventions
   `np.median(np.diff(timestamps))`.
 - No instrument constant (pupil diameter, obstruction ratio, wavelength, loop
   leak, ...) is hard-coded anywhere in this module -- every one is a required
-  argument. Per CLAUDE.md, values like this belong in the planned
-  instrument-config file, not in analysis code.
+  argument.
 
 Paper -> function map (see papers/Literature_Comparison.md for the full
 comparison)
@@ -36,68 +35,37 @@ comparison)
 - estimate_wind_gain_delay_from_psd      Madec et al. 1992 / Conan et al.
                                           1995 (Zernike PSD cutoff-frequency
                                           law) + Poyneer et al. 2009 eq. 4
-                                          (closed-loop PSD compensation).
-                                          Its gain/delay fit reproduces the
-                                          old ZernikeWindEstimation/
-                                          GetEstimatedAverageWindspeed-
-                                          ZernikeTemporalCutoff formula
-                                          (checked to ~4 significant figures).
-                                          It no longer returns a wind speed --
-                                          see the function's own docstring for
-                                          why that was removed (diagnosed as
-                                          unreliable past about radial order
-                                          5, on real telemetry).
+                                          (closed-loop PSD compensation)
 - reconstruct_pseudo_open_loop           Fusco et al. 2004 eq. 3
 - estimate_wind_speed_autocorrelation_cutoff
                                           Madec et al. 1992 / Fusco et al.
                                           2004 eq. 9-13, cutoff-frequency
                                           constant recalibrated for this
-                                          codebase's atmosphere PSD shape
+                                          module's atmosphere PSD shape
                                           (see that function's docstring)
 - detect_closed_loop_from_dm_commands / find_status_runs
-                                          new: open/closed-loop status derived
-                                          directly from DM command activity
-                                          (dm[n] == dm[n+1] implies open loop),
-                                          replacing a separately persisted
-                                          status flag
-- compute_zernike_psd_comparison         new: per-mode DM-derived (pseudo
+                                          open/closed-loop status from DM
+                                          command activity (dm[n] == dm[n+1]
+                                          means open loop)
+- compute_zernike_psd_comparison         per-mode DM-derived (pseudo
                                           open-loop atmosphere estimate) vs
                                           WFS-derived (closed-loop residual)
                                           PSD, for a caller-chosen list of
                                           modes
-- estimate_loop_bandwidth_from_psd_ratio new: model-free per-radial-order
-                                          loop bandwidth, from the crossover
-                                          of the same two PSDs -- a
-                                          cross-check on
-                                          estimate_wind_gain_delay_from_psd's
+- estimate_loop_bandwidth_from_psd_ratio model-free per-radial-order loop
+                                          bandwidth, from the crossover of
+                                          the same two PSDs -- a cross-check
+                                          on estimate_wind_gain_delay_from_psd's
                                           fitted gain/delay
 
-A note on units for the structure-function-based tau0/V0
-----------------------------------------------------------
-Atmosphere_Characterization.py's old, retired `temporal_structure_function`
-operated on the full-resolution DM phase map and scaled the result by
-`diameter ** 2`. `estimate_tau0_v0_structure_function` below instead sums
-squared per-mode coefficient differences directly (valid because
-Noll-normalized Zernike polynomials are orthonormal over the pupil, so this
-sum equals the pupil-averaged squared phase difference by Parseval's
-theorem), and applies NO extra diameter scaling -- this matches the phase
-structure function's own definition (radians^2, e.g. Conan 2008 eq. 17-19),
-which depends only on the point separation V*tau, not on the pupil diameter.
-
-This was checked, not just argued: `Calibration/Z_full_resolution` is
-Noll-normalized (unit RMS over the pupil, confirmed numerically), and
-`Calibration/DM_modes` is already in physical units (meters of surface
-deformation per unit command) that the old converter's `* 2*pi/wavelength`
-correctly turns into radians -- so the two calibration paths (`C2Z` and
-`DM_modes`+wavelength) should agree without any extra pupil-area factor. They
-do: computing the same batch's structure function via the `DM_modes` path
-with the old `* diameter**2` removed matches this module's Zernike/`C2Z`-based
-version to ~1-2% at every lag (the residual is consistent with `C2Z` and
-`Z_full_resolution` being two independently-fit calibration matrices, not
-identical to machine precision), while the version WITH the old `* diameter**2`
-is uniformly ~9x too large for a D=3 m pupil (diameter**2 = 9, exactly). The
-old code's `* diameter ** 2` was a scaling bug, not a required physical term
--- this module's version is the one to trust.
+Units of the structure function
+-------------------------------
+`zernike_structure_function` sums the squared per-mode coefficient
+differences. Noll-normalized Zernike polynomials are orthonormal over the
+pupil, so by Parseval this equals the pupil-averaged squared phase
+difference, in rad^2, with no pupil-diameter factor (Conan 2008 eq. 17-19).
+See "class reports/atmosphere_characterization_tools.md" for the numerical
+check.
 """
 
 from dataclasses import dataclass
@@ -201,16 +169,11 @@ def estimate_r0_L0(
     section 3.3 ("Tip-tilt coefficients are excluded because of the possible
     additional errors caused by telescope vibrations and tracking errors").
 
-    The fit is done in log space, each residual term divided by a linear
-    `weight_range` scale across radial orders (down-weights low orders),
-    matching the retired Atmosphere_Characterization.ComputeR0L0's behaviour.
+    Each residual is divided by a linear `weight_range` scale across radial
+    orders, which down-weights the low orders.
 
-    `L0_bounds` defaults to (1e-3, 40) m: with only a handful of radial
-    orders to constrain it and no upper prior, some batches let the fit run
-    away to an unphysical L0 (observed: >1e5 m on real telemetry) instead of
-    converging to a reasonable outer scale -- 40 m is a generous cap on
-    plausible outer scales, not an instrument constant, so it is a tunable
-    default here rather than something read from an instrument config file.
+    `L0_bounds` caps L0 at 40 m: with only a few radial orders to constrain
+    it, an unbounded fit can diverge to unphysical values.
     """
     n_samples, n_modes = zernike_modes.shape
     radial_orders_per_mode = zernike_radial_orders(n_modes, first_noll_index)
@@ -254,7 +217,7 @@ def zernike_structure_function(zernike_modes: np.ndarray, timestamps: np.ndarray
     """
     D(tau) = <|phi(t+tau) - phi(t)|^2>, computed as the sum over modes of the
     per-mode mean squared coefficient difference at each lag (see the module
-    docstring for why this replaces the diameter-scaled, phase-map version).
+    docstring for the units).
     """
     n_samples = zernike_modes.shape[0]
     max_lag = min(max_lag, n_samples - 1)
@@ -287,10 +250,9 @@ def estimate_tau0_v0_structure_function(
     V0: fit of the Kolmogorov structure function 6.88*(V*tau/r0)^(5/3) to D(tau).
 
     The lag-search window grows geometrically (doubling by default) from
-    `initial_max_lag`, capped at `max_lag_fraction` of the batch length --
-    this converges in O(log n) iterations and always terminates (returns
-    crossed_threshold=False instead of looping forever) when the batch is too
-    short or too slow-varying to reach the crossing.
+    `initial_max_lag`, capped at `max_lag_fraction` of the batch length. If
+    D(tau) never reaches the crossing, tau0 and V0 are NaN and
+    crossed_threshold is False.
     """
     n_samples = zernike_modes.shape[0]
     hard_cap = max(int(n_samples * max_lag_fraction), initial_max_lag)
@@ -403,31 +365,15 @@ def estimate_wind_gain_delay_from_psd(
     combines the per-order fitted gain/delay into one effective value each
     (plain mean over radial order).
 
-    Only meaningful for a batch drawn entirely from closed-loop telemetry --
-    the model assumes an active leaky-integrator loop. Requires the
-    DM-derived Zernike modes as input (this is a closed-loop-only estimator,
-    unlike estimate_r0_L0/estimate_tau0_v0_structure_function/
-    estimate_wind_speed_autocorrelation_cutoff, which work on either DM- or
-    WFS-derived modes).
+    Only meaningful for a batch drawn entirely from closed-loop telemetry,
+    with the DM-derived Zernike modes as input: the model assumes an active
+    leaky-integrator loop.
 
-    This function used to also combine the per-order fitted cutoff frequency
-    into a wind speed (Fusco et al. 2004 eq. 12 / Conan et al. 1995 eq. 28:
-    V0 = D * sum((n+1)*f_n) / sum(0.3*(n+1)^2)) -- removed after diagnosing it
-    on real telemetry: atmospheric power drops ~500x from radial order 2 to 9
-    while the loop's own rejection shaping doesn't, so past about n=5 the fit
-    can no longer separate the (very weak) atmosphere knee from loop-driven
-    PSD features and `f_n` drifts toward the loop's own bandwidth instead of
-    the true, much lower atmospheric cutoff. Because the combination weights
-    higher orders more heavily, this inflated the combined V0 by up to ~2.5x
-    in practice (confirmed: refitting the same batch restricted to
-    max_radial_order=5 instead of 9 changed V0 from 27 m/s to 10.8 m/s, true
-    value 12.2 m/s) -- unreliable enough that it was removed rather than kept
-    as a misleading number. `estimate_tau0_v0_structure_function` and
-    `estimate_wind_speed_autocorrelation_cutoff` are the wind-speed estimators
-    to use instead. The per-order fitted cutoff frequency is still available
-    via `per_order_params["cutoff_frequency"]` for anyone who wants to
-    recombine it (e.g. with a low `max_radial_order`, or power-weighted
-    instead of (n+1)-weighted).
+    The per-order fitted cutoff frequency is returned in
+    `per_order_params["cutoff_frequency"]` but not combined into a wind
+    speed: above radial order ~5 the atmospheric knee is too weak to separate
+    from the loop's own rejection shaping, and the combination weights those
+    orders most (see "class reports/atmosphere_characterization_tools.md").
 
     Returns both the aggregated gain/delay and the full per-radial-order fit
     (`per_order_params`) for diagnostics.
@@ -564,20 +510,15 @@ def estimate_wind_speed_autocorrelation_cutoff(
         V0   = D * sum((n+1)*f_n) / sum(0.3*(n+1)^2)   (eq. 10-12)
         tau0 = 0.31 * r0 / V0                            (eq. 13, Roddier et al. 1982)
 
-    The cutoff-frequency step (eq. 9) is recalibrated from Fusco et al.
-    2004's own `f_n = 1.15*pi / tau_n_1_over_e`: that constant was calibrated
-    against Conan et al. 1995's *exact* theoretical Zernike PSD shape, and
-    overestimates f_n by a confirmed, consistent ~11.7x when applied instead
-    to the simplified single-knee atmosphere shape this codebase actually
-    uses elsewhere (`_low_pass(f, f_c, alpha1)`, see `_closed_loop_psd_model`)
-    -- checked analytically (zero noise, zero sampling, pure numerical
-    integration of the exact autocorrelation implied by that shape), not just
-    on noisy data. This module instead uses:
+    The cutoff-frequency step (eq. 9) uses
 
         f_n = 1 / (2*pi * 1.15 * tau_n_1_over_e)
 
-    which the maintainer confirmed recovers a well-behaved wind speed on both
-    real and synthetic telemetry.
+    instead of Fusco et al. 2004's `f_n = 1.15*pi / tau_n_1_over_e`. Their
+    constant is calibrated against Conan et al. 1995's exact Zernike PSD
+    shape, and overestimates f_n by ~11.7x for the single-knee shape used in
+    this module (`_low_pass(f, f_c, alpha1)`, see `_closed_loop_psd_model`).
+    See "class reports/atmosphere_characterization_tools.md".
     """
     n_samples, n_modes = zernike_modes.shape
     dt = _sample_period(timestamps)
@@ -628,9 +569,7 @@ def detect_closed_loop_from_dm_commands(dm_commands: np.ndarray) -> np.ndarray:
     Per-sample closed-loop status derived directly from DM command activity:
     the loop is closed for sample n if the DM command changes between sample
     n and n+1 (dm[n] != dm[n+1] for at least one actuator); it is open if the
-    DM is held static. Replaces a separately persisted status flag -- per the
-    maintainer, loop status is fully determined by whether the DM is doing
-    anything, so it does not need its own stored attribute.
+    DM is held static.
 
     Returns a bool array the same length as `dm_commands` (True = closed
     loop). The last sample copies the previous sample's status, since there
@@ -721,17 +660,14 @@ def compute_zernike_psd_comparison(
 ) -> ZernikePSDComparisonResult:
     """
     Per-mode temporal PSD of the DM-derived Zernike coefficients (an estimate
-    of the open-loop/uncorrected atmosphere -- in closed loop the DM shape
-    tracks the atmosphere, see CLAUDE.md's "Open-loop turbulence" note)
-    alongside the WFS-derived Zernike coefficients (the loop's actual
+    of the open-loop/uncorrected atmosphere, since in closed loop the DM shape
+    tracks the atmosphere) alongside the WFS-derived Zernike coefficients (the loop's actual
     real-time closed-loop residual), for a caller-chosen list of mode indices
     (0-based, into the zernike_modes column ordering, e.g. [0, 1, 2, 3]).
 
     Only meaningful when the loop is closed for the whole batch: in open loop
     the DM is static and its PSD carries no information -- use
-    compute_zernike_psd on the WFS-derived modes instead. Returns the raw
-    per-mode PSDs; plotting (e.g. AnalysisViewer) is left to the caller,
-    matching every other function in this module.
+    compute_zernike_psd on the WFS-derived modes instead.
     """
     modes = np.asarray(modes)
     dm_result = compute_zernike_psd(dm_zernike_modes, timestamps, modes, nperseg=nperseg)

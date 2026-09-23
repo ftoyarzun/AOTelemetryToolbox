@@ -168,6 +168,7 @@
   stat-row("Telemetry", "r0_wfs_mean", "r0_wfs_std", [ cm]),
   stat-row("PSF fit, closed loop", "r0_psf_closed_mean", "r0_psf_closed_std", [ cm]),
   stat-row("PSF fit, open loop", "r0_psf_open_mean", "r0_psf_open_std", [ cm]),
+  stat-row("Frozen-flow profiler", "r0_frozen_flow_mean", "r0_frozen_flow_std", [ cm]),
 ))
 ]
 
@@ -193,6 +194,7 @@
 #stat-table((
   stat-row("Structure function", "tau0_mean", "tau0_std", [ ms]),
   stat-row("Autocorrelation", "tau0_autocorrelation_mean", "tau0_autocorrelation_std", [ ms]),
+  stat-row("Frozen-flow profiler", "tau0_frozen_flow_mean", "tau0_frozen_flow_std", [ ms]),
 ))
 ]
 
@@ -206,9 +208,44 @@
 #stat-table((
   stat-row("Structure function", "V0_mean", "V0_std", [ m/s]),
   stat-row("Autocorrelation", "V0_autocorrelation_mean", "V0_autocorrelation_std", [ m/s]),
+  stat-row("Frozen-flow profiler", "V0_frozen_flow_mean", "V0_frozen_flow_std", [ m/s]),
 ))
 ]
 
+]
+
+// --------------------------------
+// Frozen-Flow Layers
+// --------------------------------
+#if has("frozen_flow") [
+
+= Frozen-Flow Layers
+
+Multi-layer frozen-flow fit of the DM-command slope autocorrelation, first closed-loop batch. Velocities and directions are in the axes of the DM actuator grid.
+
+== Correlation Cube
+#figure(
+  image("correlation.png", width: 95%),
+  caption: [Correlation cube (data), multi-layer model and residual at a few time lags. Crosses: position of each fitted layer at that lag.]
+)
+
+== Layer Maps
+#figure(
+  image("layer_maps.png", width: 100%),
+  caption: [Fitted 2D correlation map of each layer.]
+)
+
+== Layer Strengths, Speeds and Directions
+#figure(
+  image("layers.png", width: 90%),
+  caption: [$C_n^2$ fraction and speed per layer, and speed against direction (marker size proportional to $C_n^2$).]
+)
+#v(8pt)
+#stat-table((
+  stat-row("Layers fitted, all batches", "frozen_flow_layers_mean", "frozen_flow_layers_std", []),
+  stat-row([$V_0$, all batches], "V0_frozen_flow_mean", "V0_frozen_flow_std", [ m/s]),
+  stat-row([$tau_0$, all batches], "tau0_frozen_flow_mean", "tau0_frozen_flow_std", [ ms]),
+))
 ]
 
 // --------------------------------

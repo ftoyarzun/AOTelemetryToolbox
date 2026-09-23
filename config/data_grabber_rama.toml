@@ -1,5 +1,4 @@
-# Data grabber configuration for the "rama" machine, filled in from the values
-# that used to be hard-coded in aott/telemetry.py.
+# Data grabber configuration for the "rama" machine.
 # Not read by any code: copy these values into data_grabber.toml to use them.
 # See data_grabber.toml for what each value means.
 
@@ -13,6 +12,8 @@ gain = "/tmp/pyrImGain.im.shm"
 [shm.dm]
 commands = "/tmp/dm1Cmd.im.shm"
 m2c = "/tmp/dm1M2A.im.shm"
+# dm actuator grid map
+dm_map = "/tmp/dm1Map.im.shm"
 
 [shm.loop]
 cmd = "/tmp/lpCmdNN.im.shm"

@@ -1,6 +1,7 @@
 from aott.PSF_Processing import PSF_Processing
 from aott.Atmosphere_Characterization import Atmosphere_Characterization
 from aott.AnalysisViewer import AnalysisViewer
+from aott.frozen_flow_profiler import ProfilerInputError, profile_file, save_results
 from aott.config import DATA_GRABBER_FILE
 from pathlib import Path
 import subprocess
@@ -16,7 +17,7 @@ except ImportError:  # Python < 3.11
     import tomli as tomllib
 
 
-DATE = "/" + datetime.now().strftime("%Y-%m-%d")
+DATE = datetime.now().strftime("%Y-%m-%d")
 
 # Where to find the newest HDF5 file and where to write the compiled PDF --
 # read from the [output] section of config/data_grabber.toml, so this
@@ -26,16 +27,11 @@ with open(DATA_GRABBER_FILE, "rb") as _f:
 hdf5_dir = Path(_output_config["hdf5_dir"])
 report_dir = Path(_output_config["report_dir"])
 
-# GrabAllSkyFrame()
-
-# DATE = '/2026-01-21'
-# RunConversion(DATE)
-
 
 # hdf5_dir holds one dated subfolder per day of observations; fall back to
 # hdf5_dir itself if that subfolder doesn't exist, e.g. local test data
 # sitting directly in hdf5_dir with no date structure.
-analysis_folder = hdf5_dir / DATE.lstrip("/")
+analysis_folder = hdf5_dir / DATE
 if not analysis_folder.is_dir():
     analysis_folder = hdf5_dir
 latest_file = max(analysis_folder.iterdir(), key=lambda f: f.stat().st_mtime)
@@ -44,17 +40,33 @@ print(latest_file)
 
 # Frames skipped after each open/closed-loop transition while the loop settles
 # (science frames for PSF_Processing, loop iterations for Atmosphere_Characterization)
-PSF_TRANSITION_BUFFER = 10
-WFS_TRANSITION_BUFFER = 10
+PSF_TRANSITION_BUFFER = 20
+WFS_TRANSITION_BUFFER = 20
 
-p2 = PSF_Processing(latest_file, batch_duration=0.1, transition_buffer=PSF_TRANSITION_BUFFER)
+p2 = PSF_Processing(latest_file, batch_duration=1, transition_buffer=PSF_TRANSITION_BUFFER)
 p2.SetPSFModel()
 p2.AnalyzeAllTheFile()
 
 
-atm_char = Atmosphere_Characterization(latest_file, batch_duration=4.0, filter_TT=False,
+atm_char = Atmosphere_Characterization(latest_file, batch_duration=1.0, filter_TT=False,
                                        transition_buffer=WFS_TRANSITION_BUFFER)
 atm_char.AnalyzeAllTheFile()
+
+
+# Frozen-flow profiler, closed-loop runs only: batches of min(run length,
+# FROZEN_FLOW_MAX_BATCH) frames, and a lag range long enough for a layer at
+# FROZEN_FLOW_MIN_SPEED to move FROZEN_FLOW_LAG_PITCHES actuator pitches
+FROZEN_FLOW_MAX_BATCH = 5000
+FROZEN_FLOW_MIN_SPEED = 1.0  # m/s
+FROZEN_FLOW_LAG_PITCHES = 2
+
+try:
+    frozen_flow = profile_file(latest_file, signal="dm", batch_size=FROZEN_FLOW_MAX_BATCH,
+                               min_speed=FROZEN_FLOW_MIN_SPEED, lag_pitches=FROZEN_FLOW_LAG_PITCHES,
+                               transition_buffer=WFS_TRANSITION_BUFFER)
+    save_results(latest_file, frozen_flow)
+except ProfilerInputError as e:
+    print(f"Frozen-flow profiler skipped: {e}")
 
 
 av = AnalysisViewer(latest_file)
@@ -65,8 +77,7 @@ av.SaveFigureManifest()
 
 
 file_title = latest_file.stem
-# Read from the HDF5 file itself (Science.attrs["Target"]) rather than
-# guessed from the filename -- p2 has already read it in during __init__.
+# Science.attrs["Target"], read by PSF_Processing
 target_name = str(p2.target_name)
 
 # Dropped in later by hand at the repo root; "none" tells the template to
@@ -143,7 +154,7 @@ print("ao_report" + file_title + ".pdf")
 
 
 report_file_name = Path("ao_report" + file_title + ".pdf")
-save_folder = report_dir / DATE.lstrip("/")
+save_folder = report_dir / DATE
 save_folder.mkdir(parents=True, exist_ok=True)
 
 shutil.move(str(report_file_name), str(save_folder / report_file_name.name))

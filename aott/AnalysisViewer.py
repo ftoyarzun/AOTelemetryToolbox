@@ -16,18 +16,15 @@ from scipy.signal import welch
 from datetime import datetime
 
 from aott.atmosphere_characterization_tools import find_status_runs
+from aott.frozen_flow_profiler import plot_correlation, plot_layer_maps, plot_layer_profile, read_first_batch
 
 
 def GetSignalPSD(signal, period):
     return welch(signal, 1 / period, nperseg=500)
 
 
-# Every PNG filename each figures-manifest key (see AnalysisViewer.manifest)
-# can produce -- the fixed list RemoveFigureFiles deletes from, once compiled
-# into the PDF report they're no longer needed standing alone in the working
-# directory. Kept as an explicit whitelist (not a "*.png" glob) so cleanup
-# never touches an unrelated PNG that happens to sit in the same directory,
-# such as a report logo.
+# PNG filename(s) per figures-manifest key: the whitelist RemoveFigureFiles
+# deletes from, so cleanup never touches an unrelated PNG such as a logo.
 _FIGURE_FILES = {
     "r0": ["AtmosphereAnalysis_r0.png"],
     "L0": ["AtmosphereAnalysis_L0.png"],
@@ -42,14 +39,12 @@ _FIGURE_FILES = {
     "psf_frames_openloop": ["PSFFrames_OpenLoop.png"],
     "jitter": ["PSFJitter.png"],
     "cog_stats": ["CoG_PSD.png", "Cumulative_Jitter.png"],
+    "frozen_flow": ["correlation.png", "layer_maps.png", "layers.png"],
 }
 
 
 def _has_data(x):
-    """True if x is a non-None array/list with at least one entry -- the one
-    check every plot method needs before touching data that may be entirely
-    absent (a group never written) or present-but-empty (written, but zero
-    batches of that regime, e.g. a file with no open-loop stretch)."""
+    """True if x is a non-None array/list with at least one entry."""
     return x is not None and len(x) > 0
 
 
@@ -57,11 +52,8 @@ def _split_at_gaps(times_raw, gap_factor=3.0):
     """
     Contiguous-run boundaries of a 1D time array, as a list of (start, end)
     index pairs, splitting wherever a gap between consecutive samples exceeds
-    `gap_factor` times the typical (median) gap. WFS/Analysis's scalar series
-    are closed-loop batches only, so an ordinary run boundary no longer shows
-    up as a status change in a stored array -- it shows up as a jump in
-    Iteration_Times (an open-loop stretch, or a run too short to analyze, was
-    skipped in between).
+    `gap_factor` times the typical (median) gap: an open-loop stretch, or a
+    run too short to analyze, was skipped there.
     """
     times_raw = np.asarray(times_raw)
     if len(times_raw) < 2:
@@ -75,12 +67,7 @@ def _split_at_gaps(times_raw, gap_factor=3.0):
 
 
 def _format_time_axis(ax):
-    """
-    Label a datetime x-axis as clock time, the same way on every plot.
-    Without this, matplotlib's AutoDateFormatter picks the format from the
-    tick spacing, so a series spanning only a few seconds (sub-second ticks)
-    got '%M:%S.%f' while a slightly longer one got '%H:%M:%S'.
-    """
+    """Label a datetime x-axis as HH:MM:SS, whatever the tick spacing."""
     locator = mdates.AutoDateLocator()
     formatter = mdates.AutoDateFormatter(locator)
     for scale in (1 / mdates.HOURS_PER_DAY, 1 / mdates.MINUTES_PER_DAY, 1 / mdates.SEC_PER_DAY):
@@ -95,10 +82,7 @@ def _format_time_axis(ax):
 
 class AnalysisViewer:
     def __init__(self, file_name):
-        # Every attribute a plot method might read is defaulted to None here,
-        # unconditionally, so no method ever hits an AttributeError just
-        # because a group (or one loop-status regime within it) is missing --
-        # _has_data(...) on any of these is always a safe, sufficient guard.
+        # Defaults, so a missing group or regime just skips its plots
         self.wfs_analysis = None
         self.science_analysis = None
         self.gsc_analysis = None
@@ -119,6 +103,9 @@ class AnalysisViewer:
         self.wfs_psd_comparison = None
         self.wfs_loop_bandwidth = None
         self.wfs_open_loop_psd = None
+        # Frozen-flow profiler: per-batch V0/tau0/r0, and the first batch's fit for its figures
+        self.frozen_flow = None
+        self.frozen_flow_first_batch = None
 
         self.long_exp_r0 = None
         self.long_exp_sr_fit = None
@@ -156,7 +143,7 @@ class AnalysisViewer:
             if "WFS" in file:
                 wfs_grp = file["WFS"]
 
-                if "Analysis" in wfs_grp:
+                if "Analysis" in wfs_grp and "r0" in wfs_grp["Analysis"]:
                     self.wfs_analysis = True
                     analysis_grp = wfs_grp["Analysis"]
                     self.wfs_r0 = analysis_grp["r0"][:]
@@ -206,6 +193,20 @@ class AnalysisViewer:
                             psd=ol_grp["PSD"][:],
                             iteration_times=ol_grp["Iteration_Times"][:],
                         )
+
+                if "Analysis" in wfs_grp and "Frozen_Flow" in wfs_grp["Analysis"]:
+                    ff_grp = wfs_grp["Analysis"]["Frozen_Flow"]
+                    times_raw = ff_grp["Iteration_Times"][:]
+                    self.frozen_flow = dict(
+                        iteration_times_raw=times_raw,
+                        iteration_times=[datetime.fromtimestamp(t) for t in times_raw],
+                        V0=ff_grp["V0"][:],
+                        tau0=ff_grp["tau0"][:],
+                        r0=ff_grp["r0"][:],
+                        n_layers=ff_grp["N_Layers"][:],
+                    )
+                    if "First_Batch" in ff_grp:
+                        self.frozen_flow_first_batch = read_first_batch(ff_grp)
 
             if "Science" in file:
                 sci_grp = file["Science"]
@@ -287,15 +288,8 @@ class AnalysisViewer:
     def _plot_segmented(self, ax, raw_times, iteration_times, values, label=None, **plot_kwargs):
         """
         Plot a time series as one line per contiguous run (detected from gaps
-        in `raw_times`), instead of one line connecting every batch -- a gap
-        (an open-loop stretch on the other side of it, or simply a run too
-        short to analyze) is a real gap in the analysis, not a value to
-        interpolate across. Needed for every per-batch series here: even a
-        single regime's own array can have more than one run (open, closed,
-        open again, ...), so a straight, one-`ax.plot`-call line would
-        silently connect across whatever regime interrupted it. `label` is
-        attached to the first run only, so the legend doesn't repeat it once
-        per run.
+        in `raw_times`), so no line is drawn across a gap in the analysis.
+        `label` is attached to the first run only.
         """
         values = np.asarray(values)
         for i, (start, end) in enumerate(_split_at_gaps(raw_times)):
@@ -335,7 +329,8 @@ class AnalysisViewer:
                     os.remove(fname)
 
     def MakeR0Plot(self):
-        if not _has_data(self.wfs_r0) and not _has_data(self.long_exp_r0) and not _has_data(self.open_loop_r0):
+        if (not _has_data(self.wfs_r0) and not _has_data(self.long_exp_r0) and not _has_data(self.open_loop_r0)
+                and self.frozen_flow is None):
             return
         fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -363,6 +358,13 @@ class AnalysisViewer:
                 linestyle="--", marker="s", linewidth=2, color="C1",
             )
             self._record_stat("r0_psf_open", self.open_loop_r0 * 100)
+        if self.frozen_flow is not None:
+            self._plot_segmented(
+                ax, self.frozen_flow["iteration_times_raw"], self.frozen_flow["iteration_times"],
+                self.frozen_flow["r0"], label="r0 from frozen-flow profiler",
+                linestyle="--", marker="o", linewidth=2, color="C2",
+            )
+            self._record_stat("r0_frozen_flow", self.frozen_flow["r0"])
         ax.set_ylabel(f"$r_0$ @ 500 nm ({self.wfs_r0_units if self.wfs_r0_units else 'cm'})")
         _format_time_axis(ax)
         ax.legend()
@@ -389,49 +391,65 @@ class AnalysisViewer:
         self._record_stat("L0", self.wfs_L0)
 
     def MakeTau0Plot(self):
-        if not _has_data(self.wfs_tau0):
+        if not _has_data(self.wfs_tau0) and self.frozen_flow is None:
             return
         fig, ax = plt.subplots(figsize=(6, 4))
-        self._plot_segmented(
-            ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0,
-            label="tau0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
-        )
-        self._plot_segmented(
-            ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0_autocorrelation,
-            label="tau0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
-        )
-        ax.set_ylabel(f"$\\tau_0$ @ 500 nm ({self.wfs_tau0_units})")
+        if _has_data(self.wfs_tau0):
+            self._plot_segmented(
+                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0,
+                label="tau0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
+            )
+            self._plot_segmented(
+                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0_autocorrelation,
+                label="tau0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
+            )
+            self._record_stat("tau0", self.wfs_tau0)
+            self._record_stat("tau0_autocorrelation", self.wfs_tau0_autocorrelation)
+        if self.frozen_flow is not None:
+            self._plot_segmented(
+                ax, self.frozen_flow["iteration_times_raw"], self.frozen_flow["iteration_times"],
+                self.frozen_flow["tau0"], label="tau0 from frozen-flow profiler",
+                linestyle="--", marker="o", linewidth=2, color="C2",
+            )
+            self._record_stat("tau0_frozen_flow", self.frozen_flow["tau0"])
+        ax.set_ylabel(f"$\\tau_0$ @ 500 nm ({self.wfs_tau0_units if self.wfs_tau0_units else 'ms'})")
         _format_time_axis(ax)
         ax.legend()
 
         fig_path = "AtmosphereAnalysis_tau0.png"
         fig.savefig(fig_path, bbox_inches="tight")
         self._flag_figure("tau0")
-        self._record_stat("tau0", self.wfs_tau0)
-        self._record_stat("tau0_autocorrelation", self.wfs_tau0_autocorrelation)
 
     def MakeV0Plot(self):
-        if not _has_data(self.wfs_V0):
+        if not _has_data(self.wfs_V0) and self.frozen_flow is None:
             return
         fig, ax = plt.subplots(figsize=(6, 4))
 
-        self._plot_segmented(
-            ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0,
-            label="V0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
-        )
-        self._plot_segmented(
-            ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0_autocorrelation,
-            label="V0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
-        )
-        ax.set_ylabel(f"$V_0$ @ 500 nm ({self.wfs_V0_units})")
+        if _has_data(self.wfs_V0):
+            self._plot_segmented(
+                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0,
+                label="V0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
+            )
+            self._plot_segmented(
+                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0_autocorrelation,
+                label="V0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
+            )
+            self._record_stat("V0", self.wfs_V0)
+            self._record_stat("V0_autocorrelation", self.wfs_V0_autocorrelation)
+        if self.frozen_flow is not None:
+            self._plot_segmented(
+                ax, self.frozen_flow["iteration_times_raw"], self.frozen_flow["iteration_times"],
+                self.frozen_flow["V0"], label="V0 from frozen-flow profiler",
+                linestyle="--", marker="o", linewidth=2, color="C2",
+            )
+            self._record_stat("V0_frozen_flow", self.frozen_flow["V0"])
+        ax.set_ylabel(f"$V_0$ @ 500 nm ({self.wfs_V0_units if self.wfs_V0_units else 'm/s'})")
         _format_time_axis(ax)
         ax.legend()
 
         fig_path = "AtmosphereAnalysis_V0.png"
         fig.savefig(fig_path, bbox_inches="tight")
         self._flag_figure("V0")
-        self._record_stat("V0", self.wfs_V0)
-        self._record_stat("V0_autocorrelation", self.wfs_V0_autocorrelation)
 
     def MakeLoopParamPlots(self):
         if not _has_data(self.wfs_effective_gain):
@@ -525,6 +543,19 @@ class AnalysisViewer:
         self._flag_figure("loop_bandwidth")
         self._record_stat("loop_bandwidth", crossover)
 
+    def MakeFrozenFlowPlots(self):
+        """The frozen-flow profiler's figures for its first closed-loop batch:
+        data, model and residual of the correlation cube at a few lags, the
+        layer maps, and C_n^2, speed and direction per layer."""
+        if self.frozen_flow_first_batch is None:
+            return
+        fit, speed, direction = self.frozen_flow_first_batch
+        plot_correlation(fit, "correlation.png")
+        plot_layer_maps(fit, speed, "layer_maps.png")
+        plot_layer_profile(fit.cn2, speed, direction, "layers.png")
+        self._flag_figure("frozen_flow")
+        self._record_stat("frozen_flow_layers", self.frozen_flow["n_layers"])
+
     def CreateAtmosphericAnalysisFigures(self):
         self.MakeR0Plot()
         self.MakeL0Plot()
@@ -533,6 +564,7 @@ class AnalysisViewer:
         self.MakeLoopParamPlots()
         self.MakePSDComparisonPlot()
         self.MakeLoopBandwidthPlot()
+        self.MakeFrozenFlowPlots()
 
     def MakeSRPlot(self):
         if not _has_data(self.long_exp_sr_fit):

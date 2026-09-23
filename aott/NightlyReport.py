@@ -32,6 +32,8 @@ _QUANTITIES = [
     ("tau0_autocorrelation", "WFS/Analysis/tau0_Autocorrelation", None, 1.0),
     ("V0", "WFS/Analysis/V0", None, 1.0),
     ("V0_autocorrelation", "WFS/Analysis/V0_Autocorrelation", None, 1.0),
+    ("tau0_frozen_flow", "WFS/Analysis/Frozen_Flow/tau0", None, 1.0),
+    ("V0_frozen_flow", "WFS/Analysis/Frozen_Flow/V0", None, 1.0),
     ("sr", "Science/Analysis/Long_Exposure/sr_fit", None, 1.0),
     ("jitter_x_closed", "Science/Analysis/Short_Exposure/Jitter", 0, 1.0),
     ("jitter_y_closed", "Science/Analysis/Short_Exposure/Jitter", 1, 1.0),
@@ -258,12 +260,14 @@ class NightlyReport:
         self._make_evolution_plot("tau0", [
             ("tau0", "tau0 from structure function", "C0", "o"),
             ("tau0_autocorrelation", "tau0 from autocorrelation", "C1", "o"),
+            ("tau0_frozen_flow", "tau0 from frozen-flow profiler", "C2", "o"),
         ], "$\\tau_0$ @ 500 nm (ms)")
 
     def MakeV0Plot(self):
         self._make_evolution_plot("V0", [
             ("V0", "V0 from structure function", "C0", "o"),
             ("V0_autocorrelation", "V0 from autocorrelation", "C1", "o"),
+            ("V0_frozen_flow", "V0 from frozen-flow profiler", "C2", "o"),
         ], "$V_0$ @ 500 nm (m/s)")
 
     def MakeStrehlPlot(self):

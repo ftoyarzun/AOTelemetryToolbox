@@ -1,18 +1,15 @@
 # Instrument configuration: the one instrument config of the project, edit it for the
-# instrument in use. Read by aott/telemetry.py and simulation/DataGeneration.ipynb
-# (aott.config.LoadInstrument), which refuse to start while a value is still "TODO".
+# instrument in use. Read by aott/telemetry.py (aott.config.LoadInstrument), which
+# refuses to start while a value is still "TODO".
 # example_instrument.toml holds filled-in example values to copy from.
 
 [instrument]
 # name of the AO system and of the telescope it is mounted on
-# Seen in code: "T152-Papyrus", a literal in AutomaticAnalysis.py (report title)
 name = "TODO"
 telescope = "TODO"
 
 [site]
 # geographic position of the observatory, used for the target elevation
-# Seen in code: 43.9308333 deg, 5.71333 deg, 650 m (Observatoire de Haute-Provence),
-# hard-coded in the former aott/GetStarData.py
 latitude_deg = "TODO"
 longitude_deg = "TODO"
 height_m = "TODO"

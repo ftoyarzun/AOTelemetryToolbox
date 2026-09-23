@@ -28,6 +28,7 @@ REQUIRED_KEYS = [
     "shm.science.dit",
     "shm.science.fps",
     "shm.science.gain",
+    "shm.dm.dm_map",
     "acquisition.semaphore",
     "calibration.Z2C",
     "output.hdf5_dir",
@@ -80,7 +81,7 @@ class Recording(NamedTuple):
                        sample as Unix time [s], so they line up with `data`. None for
                        streams without record_timestamps. get_timestamp() returns a
                        naive datetime, which .timestamp() reads as local time of this
-                       machine, as Telemetry_conversion does.
+                       machine.
     """
 
     timestamps: np.ndarray

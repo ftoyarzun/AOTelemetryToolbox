@@ -26,6 +26,8 @@ gain = "TODO"
 commands = "TODO"
 # modes to commands matrix, read once
 m2c = "TODO"
+# dm actuator grid map
+dm_map = "TODO"
 
 [shm.loop]
 # loop command (open/closed status), grabbed together with the DM commands

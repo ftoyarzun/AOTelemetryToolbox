@@ -251,7 +251,7 @@ def strehl_ratio(psf, sampling):
 
 
 class PSF_Processing:
-    def __init__(self, file_name, batch_duration=0.1, transition_buffer=20):
+    def __init__(self, file_name, batch_duration=0.1, transition_buffer=10):
         self.file_name = file_name
         self.batch_start = 0
         self.batch_duration = batch_duration
@@ -285,10 +285,7 @@ class PSF_Processing:
             self.exposure_time = science_frames_dset.attrs['Exposure_Time']
             self.fps = science_frames_dset.attrs['FPS']
             self.period = 1 / self.fps
-            # batch_duration is a time window (seconds); convert to samples
-            # using this file's own frame rate, rather than hard-coding a
-            # frame count that silently means a different duration on a
-            # different-rate file.
+            # batch_duration is in seconds
             self.batch_size = max(round(self.batch_duration * self.fps), 1)
             self.gain = science_frames_dset.attrs['Gain']
             self.sampling_calib = science_frames_dset.attrs['Sampling']
@@ -387,9 +384,7 @@ class PSF_Processing:
 
 
     def SetPSFModel(self):
-        # Both models are built unconditionally, keyed by loop status, since a
-        # file can mix open- and closed-loop batches -- selected per batch in
-        # FitPSFModel instead of once for the whole file.
+        # One model per loop status, chosen per batch in FitPSFModel
         self.psf_models = {
             True: (Psfao((self.nx, self.nx), system=self.instrument, samp=self.sampling),
                    [0.09, 1e-4, 0.4, 0.5, 1, 0, 1.5], [False] * 7),
@@ -454,10 +449,7 @@ class PSF_Processing:
                 start += size
                 print(f'{start} out of {self.number_of_frames} frames processed')
 
-        # Reshape explicitly so an empty regime still yields an array with the
-        # right number of dimensions (e.g. (0, nx, nx) rather than a bare
-        # (0,)) instead of just an empty flat array -- AnalysisViewer and any
-        # later re-run's shape-compatibility check both rely on this.
+        # Reshape so an empty regime is still (0, nx, nx), not (0,)
         self.long_exp_r0_list = np.array(closed_r0)
         self.long_exp_sr_otf_list = np.array(closed_sr_otf)
         self.long_exp_sr_fit_list = np.array(closed_sr_fit)
@@ -478,9 +470,7 @@ class PSF_Processing:
     def FitPSFModel(self, psf, is_closed_loop, display = False):
         psfmodel, psfparam_guess, fixed = self.psf_models[is_closed_loop]
 
-        ron = 0
-        weights = None# 1/(gaussian_filter(np.abs(psf), 2)+ron**2)
-        out = psffit(psf, psfmodel, psfparam_guess, weights=weights, fixed=fixed, max_nfev=60)
+        out = psffit(psf, psfmodel, psfparam_guess, weights=None, fixed=fixed, max_nfev=60)
         otf_fit_avg = circavg(get_otf(out.psf), center=(self.nx//2,self.nx//2))
 
         psf_norm = (psf-out.flux_bck[1])/out.flux_bck[0]
@@ -488,7 +478,7 @@ class PSF_Processing:
         otf = get_otf(psf_norm)
         otf_avg = circavg(otf, center=(self.nx//2,self.nx//2))
 
-        r0 = out.x[0]#/np.cos(np.pi/2-self.elevation*np.pi/180)**(3/5)
+        r0 = out.x[0]
         r0_V0 = r0 * (self.r0_reference_wvl / self.wvl) ** (6/5)
         seeing = self.rad2arcsec*self.r0_reference_wvl/r0_V0
 
@@ -530,7 +520,6 @@ class PSF_Processing:
 
             plt.figure(1, figsize=(9,4))
             plt.clf()
-            #plt.suptitle('Strehl = %.1f %%\nSeeing = %.1f\"'%(100*sr, seeing))
             plt.subplot(131)
             plt.title('data')
             setplt(psf_norm)
@@ -610,10 +599,8 @@ class PSF_Processing:
             write_or_replace(analysis_grp_se,'CoG-Y', data = self.cogs_y)
             write_or_replace(analysis_grp_se,'Is_Closed_Loop', data = self.frame_is_closed_loop)
             analysis_grp_se.attrs['Transition_Buffer_Frames'] = self.transition_buffer
-            # Jitter is one entry per PSF batch, same cadence as Long_Exposure/
-            # Long_Exposure_OpenLoop -- split the same way, and read each
-            # regime's own Iteration_Times there instead of duplicating a
-            # third copy here.
+            # Jitter is one entry per PSF batch: its times are the
+            # Iteration_Times of Long_Exposure/Long_Exposure_OpenLoop.
             write_or_replace(analysis_grp_se,'Jitter', data = self.jitter)
             write_or_replace(analysis_grp_se,'Jitter_OpenLoop', data = self.open_loop_jitter)
 
