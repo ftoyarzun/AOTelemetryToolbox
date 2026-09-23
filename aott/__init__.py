@@ -1,4 +1,4 @@
-"""AOTelemetryToolbox: adaptive optics telemetry analysis for the T152 Papyrus telescope.
+"""AOTelemetryToolbox: adaptive optics telemetry analysis.
 
 Import the modules from here, for example ``from aott import PSF_Processing``. That gives the
 module; the class of the same name is ``PSF_Processing.PSF_Processing`` (or

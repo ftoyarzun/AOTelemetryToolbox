@@ -3,7 +3,7 @@ Standalone atmosphere/AO-loop characterization functions.
 
 Every function here is self-contained: none depend on a class, on `self`
 state, or on another function in this module having run first (parameters
-a caller might otherwise pass implicitly via `self`, e.g. r0 into the V0 fit,
+a caller might otherwise pass implicitly via `self`, e.g. r0 into the tau0 estimate,
 are explicit required arguments here instead). `Atmosphere_Characterization`
 (the class in Atmosphere_Characterization.py) is a thin orchestrator around
 these functions -- it reads the HDF5 file, batches the telemetry, and calls
@@ -28,10 +28,6 @@ Paper -> function map (see papers/Literature_Comparison.md for the full
 comparison)
 ------------------------------------------------------------------------
 - estimate_r0_L0                        Fusco et al. 2004 (NAOS) eq. 8
-- estimate_tau0_v0_structure_function    Kolmogorov D(tau); tau0/V0
-                                          definitions match Berdeu et al.
-                                          2025/2026 eq. 14 and SHIMM
-                                          (Perera et al. 2023) eq. 5
 - estimate_wind_gain_delay_from_psd      Madec et al. 1992 / Conan et al.
                                           1995 (Zernike PSD cutoff-frequency
                                           law) + Poyneer et al. 2009 eq. 4
@@ -39,14 +35,14 @@ comparison)
 - reconstruct_pseudo_open_loop           Fusco et al. 2004 eq. 3
 - estimate_wind_speed_autocorrelation_cutoff
                                           Madec et al. 1992 / Fusco et al.
-                                          2004 eq. 9-13, cutoff-frequency
-                                          constant recalibrated for this
-                                          module's atmosphere PSD shape
-                                          (see that function's docstring)
-- detect_closed_loop_from_dm_commands / find_status_runs
-                                          open/closed-loop status from DM
-                                          command activity (dm[n] == dm[n+1]
-                                          means open loop)
+                                          2004 eq. 9-13, with the 1/e-width
+                                          to cutoff-frequency constant of
+                                          each radial order computed from
+                                          Conan et al. 1995's frozen-flow
+                                          model (autocorrelation_cutoff_constant)
+- read_loop_status / find_status_runs    open/closed-loop status from the
+                                          loop command recorded at every
+                                          iteration (nonzero = closed loop)
 - compute_zernike_psd_comparison         per-mode DM-derived (pseudo
                                           open-loop atmosphere estimate) vs
                                           WFS-derived (closed-loop residual)
@@ -57,25 +53,18 @@ comparison)
                                           the same two PSDs -- a cross-check
                                           on estimate_wind_gain_delay_from_psd's
                                           fitted gain/delay
-
-Units of the structure function
--------------------------------
-`zernike_structure_function` sums the squared per-mode coefficient
-differences. Noll-normalized Zernike polynomials are orthonormal over the
-pupil, so by Parseval this equals the pupil-averaged squared phase
-difference, in rad^2, with no pupil-diameter factor (Conan 2008 eq. 17-19).
-See "class reports/atmosphere_characterization_tools.md" for the numerical
-check.
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, Optional
 
 import numpy as np
+from scipy.integrate import trapezoid
 from scipy.interpolate import interp1d
-from scipy.optimize import curve_fit
+from scipy.optimize import brentq, curve_fit
 from scipy.signal import welch
-from scipy.special import gamma
+from scipy.special import gamma, jv
 
 
 # ---------------------------------------------------------------------------
@@ -199,98 +188,38 @@ def estimate_r0_L0(
                        measured_variance=measured_variance, model_variance=model_variance)
 
 
-# ---------------------------------------------------------------------------
-# 2. tau0 / V0 -- temporal structure function of the Zernike-projected phase
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Tau0V0Result:
-    tau0: float
-    V0: float
-    lags: np.ndarray
-    structure_function: np.ndarray
-    crossed_threshold: bool
-    max_lag_reached: int
-
-
-def zernike_structure_function(zernike_modes: np.ndarray, timestamps: np.ndarray, max_lag: int):
+def r0_at_zenith(r0, elevation_deg):
     """
-    D(tau) = <|phi(t+tau) - phi(t)|^2>, computed as the sum over modes of the
-    per-mode mean squared coefficient difference at each lag (see the module
-    docstring for the units).
+    Line-of-sight r0 at `elevation_deg` converted to zenith: r0 scales as
+    cos(z)^(3/5) with the zenith angle z, so r0_zenith = r0 * sin(elevation)^(-3/5).
+    NaN where the elevation is NaN (unknown).
     """
-    n_samples = zernike_modes.shape[0]
-    max_lag = min(max_lag, n_samples - 1)
-    lags = np.arange(max_lag + 1)
-    D_tau = np.empty(max_lag + 1)
-    for k in lags:
-        if k == 0:
-            D_tau[k] = 0.0
-        else:
-            diff = zernike_modes[:-k] - zernike_modes[k:]
-            D_tau[k] = np.mean(np.sum(diff ** 2, axis=1))
-    dt = _sample_period(timestamps)
-    return lags * dt, D_tau
+    return np.asarray(r0, dtype=float) * np.sin(np.radians(elevation_deg)) ** (-3 / 5)
 
 
-def estimate_tau0_v0_structure_function(
-    zernike_modes: np.ndarray,
-    timestamps: np.ndarray,
-    r0: float,
-    initial_max_lag: int = 20,
-    growth_factor: float = 2.0,
-    max_lag_fraction: float = 0.25,
-    crossing_level: float = 1.0,
-    safety_multiplier: float = 2.0,
-    v0_bounds: tuple = (1e-3, np.inf),
-    v0_initial_guess: float = 10.0,
-) -> Tau0V0Result:
+def tau0_at_zenith(tau0, elevation_deg):
     """
-    tau0: lag at which D(tau) first crosses `crossing_level` (1 rad^2).
-    V0: fit of the Kolmogorov structure function 6.88*(V*tau/r0)^(5/3) to D(tau).
-
-    The lag-search window grows geometrically (doubling by default) from
-    `initial_max_lag`, capped at `max_lag_fraction` of the batch length. If
-    D(tau) never reaches the crossing, tau0 and V0 are NaN and
-    crossed_threshold is False.
+    Line-of-sight tau0 at `elevation_deg` converted to zenith. V0 is a
+    normalized C_n^2 average of the wind speeds, so it does not depend on the
+    elevation, and tau0 = 0.314 r0 / V0 scales like r0 (see r0_at_zenith).
     """
-    n_samples = zernike_modes.shape[0]
-    hard_cap = max(int(n_samples * max_lag_fraction), initial_max_lag)
+    return r0_at_zenith(tau0, elevation_deg)
 
-    max_lag = min(initial_max_lag, hard_cap)
-    lag_times, D_tau = zernike_structure_function(zernike_modes, timestamps, max_lag)
 
-    while D_tau.max() < safety_multiplier * crossing_level and max_lag < hard_cap:
-        new_max_lag = min(int(max_lag * growth_factor), hard_cap)
-        if new_max_lag == max_lag:
-            break
-        max_lag = new_max_lag
-        lag_times, D_tau = zernike_structure_function(zernike_modes, timestamps, max_lag)
+def seeing_arcsec(r0, wavelength):
+    """Seeing FWHM 0.98 wavelength / r0 [arcsec] of a Kolmogorov atmosphere, with r0
+    and wavelength in the same length unit, r0 given at that wavelength."""
+    return 0.98 * wavelength / np.asarray(r0, dtype=float) * 180 / np.pi * 3600
 
-    crossed = bool(D_tau.max() >= crossing_level)
-    if not crossed:
-        return Tau0V0Result(tau0=np.nan, V0=np.nan, lags=lag_times, structure_function=D_tau,
-                             crossed_threshold=False, max_lag_reached=max_lag)
 
-    over = np.where(D_tau >= crossing_level)[0]
-    i1 = over[0]
-    if i1 == 0:
-        tau0 = float(lag_times[0])
-    else:
-        interpolator = interp1d(D_tau[i1 - 1:i1 + 1], lag_times[i1 - 1:i1 + 1], kind="linear")
-        tau0 = float(interpolator(crossing_level))
-
-    def model(delay, wind_speed):
-        return 6.88 * (wind_speed * delay / r0) ** (5 / 3)
-
-    V0_fit, _ = curve_fit(model, lag_times, D_tau, p0=[v0_initial_guess], bounds=v0_bounds)
-
-    return Tau0V0Result(tau0=tau0, V0=float(V0_fit[0]), lags=lag_times, structure_function=D_tau,
-                         crossed_threshold=True, max_lag_reached=max_lag)
+def seeing_at_zenith(seeing, elevation_deg):
+    """Line-of-sight seeing at `elevation_deg` converted to zenith: seeing scales as
+    1 / r0, so seeing_zenith = seeing * sin(elevation)^(3/5). NaN where the elevation is NaN."""
+    return np.asarray(seeing, dtype=float) * np.sin(np.radians(elevation_deg)) ** (3 / 5)
 
 
 # ---------------------------------------------------------------------------
-# 3. Effective gain / effective delay -- full AO transfer-function fit to the
+# 2. Effective gain / effective delay -- full AO transfer-function fit to the
 #    per-radial-order temporal PSD
 # ---------------------------------------------------------------------------
 
@@ -424,7 +353,7 @@ def estimate_wind_gain_delay_from_psd(
 
 
 # ---------------------------------------------------------------------------
-# 4. Pseudo-open-loop reconstruction -- Fusco et al. 2004 eq. 3
+# 3. Pseudo-open-loop reconstruction -- Fusco et al. 2004 eq. 3
 # ---------------------------------------------------------------------------
 
 def reconstruct_pseudo_open_loop(
@@ -463,8 +392,8 @@ def reconstruct_pseudo_open_loop(
 
 
 # ---------------------------------------------------------------------------
-# 5. Second tau0/wind estimator -- autocorrelation-cutoff (Madec et al. 1992 /
-#    Fusco et al. 2004 eq. 9-13), independent of the structure-function one
+# 4. tau0/wind estimator -- autocorrelation cutoff (Madec et al. 1992 /
+#    Fusco et al. 2004 eq. 9-13)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -488,6 +417,31 @@ def _temporal_autocorrelation(zernike_modes: np.ndarray, max_lag: int):
     return lags, autocorr
 
 
+@lru_cache(maxsize=None)
+def autocorrelation_cutoff_constant(n: int) -> float:
+    """
+    K_n = f_n * tau_n for Zernike radial order n under a single frozen-flow
+    Kolmogorov layer of speed V, where f_n = 0.3 (n+1) V / D is the cutoff
+    frequency of Conan et al. 1995 and tau_n the lag at which the order's
+    temporal autocorrelation falls to 1/e.
+
+    Summed over the modes of one radial order, the Zernike spectrum is
+    isotropic, proportional to k^(-11/3) J_{n+1}(pi k D)^2 / k^2, so the
+    autocorrelation at a shift x = V tau / D is
+
+        A_n(x) = int u^(-14/3) J_{n+1}(u)^2 J_0(2 u x) du / int u^(-14/3) J_{n+1}(u)^2 du
+
+    and K_n = 0.3 (n+1) x_e, with A_n(x_e) = 1/e: 0.316 for n = 2, then 0.269,
+    0.254, 0.246, 0.242, 0.240, 0.238 for n = 3-8. The integrals are sums on a
+    grid up to u = 100, accurate to 1e-4 in K_n.
+    """
+    u = np.linspace(1e-6, 100.0, 20001)
+    weight = u ** (-14 / 3) * jv(n + 1, u) ** 2
+    norm = trapezoid(weight, u)
+    x_e = brentq(lambda x: trapezoid(weight * jv(0, 2 * u * x), u) / norm - np.exp(-1), 1e-4, 2.0, xtol=1e-8)
+    return 0.3 * (n + 1) * x_e
+
+
 def estimate_wind_speed_autocorrelation_cutoff(
     zernike_modes: np.ndarray,
     timestamps: np.ndarray,
@@ -499,26 +453,18 @@ def estimate_wind_speed_autocorrelation_cutoff(
     n_lags: Optional[int] = None,
 ) -> AutocorrelationWindResult:
     """
-    Independent wind-speed (and, if r0 is given, tau0) estimator from the 1/e
-    width of each radial order's temporal autocorrelation, for cross-checking
-    against estimate_tau0_v0_structure_function's structure-function-based
-    value.
-
-    Loosely follows Madec et al. 1992 / Fusco et al. 2004 eq. 9-13 (itself
-    calibrated against Conan et al. 1995's exact theoretical Zernike temporal
-    PSD shape):
+    Wind speed (and, if r0 is given, tau0) from the 1/e width of each radial
+    order's temporal autocorrelation (Madec et al. 1992 / Fusco et al. 2004
+    eq. 9-13):
+        f_n  = K_n / tau_n                              (cutoff frequency of order n)
         V0   = D * sum((n+1)*f_n) / sum(0.3*(n+1)^2)   (eq. 10-12)
         tau0 = 0.31 * r0 / V0                            (eq. 13, Roddier et al. 1982)
 
-    The cutoff-frequency step (eq. 9) uses
-
-        f_n = 1 / (2*pi * 1.15 * tau_n_1_over_e)
-
-    instead of Fusco et al. 2004's `f_n = 1.15*pi / tau_n_1_over_e`. Their
-    constant is calibrated against Conan et al. 1995's exact Zernike PSD
-    shape, and overestimates f_n by ~11.7x for the single-knee shape used in
-    this module (`_low_pass(f, f_c, alpha1)`, see `_closed_loop_psd_model`).
-    See "class reports/atmosphere_characterization_tools.md".
+    tau_n is the lag where the order's autocorrelation, averaged over its
+    modes, falls to 1/e, and K_n = autocorrelation_cutoff_constant(n), so that
+    V0 is the layer speed for a single frozen-flow layer. The autocorrelation
+    is taken over the batch after removing its mean, which shortens tau_n, and
+    so raises V0, when the batch is not much longer than tau_n.
     """
     n_samples, n_modes = zernike_modes.shape
     dt = _sample_period(timestamps)
@@ -548,7 +494,7 @@ def estimate_wind_speed_autocorrelation_cutoff(
             interpolator = interp1d(normalized[i1 - 1:i1 + 1], lag_times[i1 - 1:i1 + 1], kind="linear")
             e_folding_lag[k] = float(interpolator(1 / np.e))
 
-    cutoff_frequency = 1 / e_folding_lag / (1.15 * 2 * np.pi)  # recalibrated eq. 9, see docstring above
+    cutoff_frequency = np.array([autocorrelation_cutoff_constant(int(n)) for n in orders]) / e_folding_lag
 
     valid = ~np.isnan(cutoff_frequency)
     n_plus_1 = orders[valid] + 1
@@ -561,28 +507,31 @@ def estimate_wind_speed_autocorrelation_cutoff(
 
 
 # ---------------------------------------------------------------------------
-# 6. Open/closed-loop status, derived from DM command activity
+# 5. Open/closed-loop status, from the recorded loop command
 # ---------------------------------------------------------------------------
 
-def detect_closed_loop_from_dm_commands(dm_commands: np.ndarray) -> np.ndarray:
+def read_loop_status(wfs_grp) -> np.ndarray:
     """
-    Per-sample closed-loop status derived directly from DM command activity:
-    the loop is closed for sample n if the DM command changes between sample
-    n and n+1 (dm[n] != dm[n+1] for at least one actuator); it is open if the
-    DM is held static.
+    Per-sample closed-loop status (True = closed), one entry per row of
+    `wfs_grp["DM_commands"]`: the loop command the RTC recorded at every
+    loop iteration, any nonzero value meaning closed loop. It is the
+    `loop_status` dataset of the open WFS group, or its `loop_status`
+    attribute in simulated files.
 
-    Returns a bool array the same length as `dm_commands` (True = closed
-    loop). The last sample copies the previous sample's status, since there
-    is no n+1 to compare it against.
+    Raises KeyError if the file has neither, and ValueError if its length
+    doesn't match DM_commands.
     """
-    n_samples = dm_commands.shape[0]
-    if n_samples < 2:
-        return np.ones(n_samples, dtype=bool)
-    changed = np.any(dm_commands[1:] != dm_commands[:-1], axis=1)
-    is_closed = np.empty(n_samples, dtype=bool)
-    is_closed[:-1] = changed
-    is_closed[-1] = changed[-1]
-    return is_closed
+    if "loop_status" in wfs_grp:
+        loop_status = np.atleast_1d(wfs_grp["loop_status"][()])
+    elif "loop_status" in wfs_grp.attrs:
+        loop_status = np.asarray(wfs_grp.attrs["loop_status"])
+    else:
+        raise KeyError("no WFS/loop_status: the open/closed-loop status was not recorded")
+
+    n_samples = wfs_grp["DM_commands"].shape[0]
+    if loop_status.shape[0] != n_samples:
+        raise ValueError(f"WFS/loop_status has {loop_status.shape[0]} samples, DM_commands has {n_samples}")
+    return np.any(loop_status.reshape(n_samples, -1) != 0, axis=1)
 
 
 def find_status_runs(status: np.ndarray, transition_buffer: int = 0):
@@ -612,7 +561,7 @@ def find_status_runs(status: np.ndarray, transition_buffer: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# 7. DM-derived vs WFS-derived Zernike PSD -- a direct closed-loop diagnostic
+# 6. DM-derived vs WFS-derived Zernike PSD -- a direct closed-loop diagnostic
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -677,7 +626,7 @@ def compute_zernike_psd_comparison(
 
 
 # ---------------------------------------------------------------------------
-# 8. Model-free loop bandwidth -- crossover of the DM- and WFS-derived PSDs
+# 7. Model-free loop bandwidth -- crossover of the DM- and WFS-derived PSDs
 # ---------------------------------------------------------------------------
 
 @dataclass

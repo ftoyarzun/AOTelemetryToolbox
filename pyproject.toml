@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aotelemetrytoolbox"
 version = "0.1.0"
-description = "Analyze adaptive optics telemetry from the T152 Papyrus telescope: atmosphere and AO loop parameters, plots and a PDF report."
+description = "Analyze adaptive optics telemetry: atmosphere and AO loop parameters, plots and a PDF report."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -25,10 +25,17 @@ dependencies = [
     "scipy",
     "matplotlib",  # also provides pylab, which most modules import
     "astropy",  # target coordinates and elevation in telemetry.py
-    "maoppy",  # PSF fitting; its data folder holds the papyrus instrument definition
+    "maoppy",  # PSF fitting
     "tomli; python_version < '3.11'",  # tomllib backport, for the config files
     "astroquery",  # SIMBAD query in telemetry.py
 ]
+
+[project.optional-dependencies]
+# pip install -e ".[dev]", then python -m pytest from the repo root
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 # The package is imported as "aott" (from aott.PSF_Processing import PSF_Processing). For prototyping, install
 # it in editable mode (pip install -e .) so that edits in aott/ show up without reinstalling.

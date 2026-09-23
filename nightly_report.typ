@@ -36,14 +36,35 @@
   v(4pt, weak: true)
 }
 
+// `x` with exactly `digits` decimals, trailing zeros kept.
+#let fixed(x, digits) = {
+  let s = str(calc.round(x, digits: digits))
+  if digits == 0 { return s }
+  let parts = s.split(".")
+  let frac = if parts.len() > 1 { parts.at(1) } else { "" }
+  parts.at(0) + "." + frac + "0" * (digits - frac.len())
+}
+
+// Decimals that show a spread with 2 significant figures when its leading
+// digit is 1 or 2, else 1 (as in ao_report.typ).
+#let spread-digits(spread) = {
+  let e = calc.floor(calc.log(spread))
+  let sig = if spread / calc.pow(10.0, e) < 3 { 2 } else { 1 }
+  calc.max(0, sig - 1 - e)
+}
+
 // One per-target table cell: the median of the per-observation medians, with
-// the interquartile range across observations underneath in small print.
+// the interquartile range across observations underneath in small print, all
+// rounded to the precision of the interquartile range (`digits` when it is 0).
 #let summary-cell(target, key, digits: 1) = {
   let s = target.stats.at(key, default: none)
-  if s == none [--] else [
-    #calc.round(s.median, digits: digits) \
-    #text(size: 6.5pt, fill: gray)[#calc.round(s.q25, digits: digits)–#calc.round(s.q75, digits: digits)]
-  ]
+  if s == none [--] else {
+    let d = if s.q75 > s.q25 { spread-digits(s.q75 - s.q25) } else { digits }
+    [
+      #fixed(s.median, d) \
+      #text(size: 6.5pt, fill: gray)[#fixed(s.q25, d)–#fixed(s.q75, d)]
+    ]
+  }
 }
 
 #let mag-cell(target, band) = {
@@ -110,7 +131,7 @@
 
 = Observed Targets
 
-Per target: median of the per-observation medians; the small numbers underneath are the interquartile range across observations. SF: structure function, AC: autocorrelation, FF: frozen-flow profiler, CL: closed loop, OL: open loop.
+Per target: median of the per-observation medians; the small numbers underneath are the interquartile range across observations. FF: frozen-flow profiler, AC: autocorrelation (cross-check), CL: closed loop, OL: open loop.
 
 == Targets and Magnitudes
 #target-table(
@@ -120,16 +141,16 @@ Per target: median of the per-observation medians; the small numbers underneath 
 
 == Atmospheric Conditions
 #target-table(
-  ([$r_0$ telemetry (cm)], [$r_0$ PSF, CL (cm)], [$r_0$ PSF, OL (cm)], [$L_0$ (m)],
-   [$tau_0$ SF (ms)], [$tau_0$ AC (ms)], [$tau_0$ FF (ms)], [$V_0$ SF (m/s)], [$V_0$ AC (m/s)], [$V_0$ FF (m/s)]),
-  t => ("r0_wfs", "r0_psf_closed", "r0_psf_open", "L0",
-        "tau0", "tau0_autocorrelation", "tau0_frozen_flow", "V0", "V0_autocorrelation",
-        "V0_frozen_flow").map(k => summary-cell(t, k)),
+  ([$r_0$ zenith, telemetry (cm)], [$r_0$ zenith, PSF, CL (cm)], [$r_0$ zenith, PSF, OL (cm)],
+   [$tau_0$ zenith, FF (ms)], [$tau_0$ zenith, AC (ms)], [$V_0$ FF (m/s)], [$V_0$ AC (m/s)]),
+  t => ("r0_wfs", "r0_psf_closed", "r0_psf_open",
+        "tau0_frozen_flow", "tau0_autocorrelation", "V0_frozen_flow",
+        "V0_autocorrelation").map(k => summary-cell(t, k)),
 )
 
 == Strehl Ratio and Jitter
 #target-table(
-  ("Strehl ratio, CL", [Jitter x, CL ($lambda slash D$)], [Jitter y, CL ($lambda slash D$)],
+  ("Strehl ratio, CL (%)", [Jitter x, CL ($lambda slash D$)], [Jitter y, CL ($lambda slash D$)],
    [Jitter x, OL ($lambda slash D$)], [Jitter y, OL ($lambda slash D$)]),
   t => (summary-cell(t, "sr"),
         ..("jitter_x_closed", "jitter_y_closed", "jitter_x_open", "jitter_y_open").map(k => summary-cell(t, k, digits: 3))),
@@ -140,25 +161,20 @@ Per target: median of the per-observation medians; the small numbers underneath 
 // --------------------------------
 // Atmospheric evolution
 // --------------------------------
-#if has("r0") or has("L0") or has("tau0") or has("V0") [
+#if has("r0") or has("tau0") or has("V0") [
 
 = Atmospheric Conditions over the Night
 
-One point per observation: median over its batches, error bar spanning the interquartile range. Target names are on the top axis.
+One point per observation: median over its batches, error bar spanning the interquartile range. Times are UTC. Target names are on the top axis.
 
 #if has("r0") [
 == Fried Parameter ($r_0$)
-#figure(image("Nightly_r0.png", width: 100%), caption: [$r_0$ per observation.])
-]
-
-#if has("L0") [
-== Outer Scale ($L_0$)
-#figure(image("Nightly_L0.png", width: 100%), caption: [$L_0$ per observation.])
+#figure(image("Nightly_r0.png", width: 100%), caption: [$r_0$ per observation, corrected to zenith with the elevation at the acquisition start.])
 ]
 
 #if has("tau0") [
 == Coherence Time ($tau_0$)
-#figure(image("Nightly_tau0.png", width: 100%), caption: [$tau_0$ per observation.])
+#figure(image("Nightly_tau0.png", width: 100%), caption: [$tau_0$ per observation, corrected to zenith with the elevation at the acquisition start.])
 ]
 
 #if has("V0") [

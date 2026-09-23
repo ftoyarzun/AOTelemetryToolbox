@@ -1,0 +1,58 @@
+# Analysis configuration: the one analysis config of the project. PSF_Processing,
+# Atmosphere_Characterization and the frozen-flow profiler take every setting they
+# are not given explicitly from here, and write the values they used as attrs on
+# their Analysis group. "auto" and "none" are spelled out, since TOML has no null.
+
+[psf]
+# long-exposure batch length [s]
+batch_duration = 1.0
+# science frames skipped after each open/closed-loop transition
+transition_buffer = 20
+
+[atmosphere]
+# batch length [s]; batches overlap by half
+batch_duration = 1.0
+# loop iterations skipped after each open/closed-loop transition
+transition_buffer = 20
+# Zernike modes: the first n_zernike columns of Calibration/Z2C (also used for the
+# frozen-flow profiler's r0)
+n_zernike = 50
+# radial orders the r0/L0 fit uses (also used for the frozen-flow profiler's r0)
+min_radial_order = 3
+max_radial_order = 8
+# remove tip/tilt from the commands and measurements before the projection
+filter_tip_tilt = false
+# modes of the DM/WFS PSD comparison and of the open-loop PSD, 0 = tip
+psd_comparison_modes = [0, 1, 2, 3]
+# Welch segment length of those PSDs and of the crossover frequency [samples]
+psd_nperseg = 500
+
+[frozen_flow]
+# "dm" (DM commands alone) or "pol" (pseudo-open loop)
+signal = "dm"
+# loop delay [frames] and sign of the DM commands in the pseudo-open loop
+frame_delay = 2
+dm_sign = -1.0
+# maximum frames per batch; a shorter closed-loop run is one batch
+batch_size = 5000
+# largest time lag fitted [frames]; "auto": the time a layer at min_speed [m/s]
+# takes to move lag_pitches actuator pitches
+max_lag = "auto"
+min_speed = 1.0
+lag_pitches = 2.0
+# skip closed-loop runs shorter than this many max lags
+min_run_lags = 2.0
+# maximum number of layers, and the C_n^2 below which no layer is added
+n_layers = 6
+min_peak = 0.0
+# loop iterations skipped after each open/closed-loop transition
+transition_buffer = 20
+# leading Z2C modes removed from every sample, from tip on (3: tip, tilt, defocus)
+low_order_modes = 3
+# low-pass the signal onto the first n_zernike Z2C modes (0: no filter)
+n_zernike = 50
+# keep only the slopes inside this radius [actuator pitches from the DM_Map centre];
+# "auto": (Actuators_in_diameter - 1) / 2, "none": every actuator
+pupil_radius = "auto"
+# bound on the tracked peak's move per lag, per axis [m/s]; "none": no bound
+max_speed = 50.0

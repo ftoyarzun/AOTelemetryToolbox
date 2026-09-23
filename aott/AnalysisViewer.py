@@ -1,6 +1,5 @@
 import h5py
 import json
-import os
 
 import numpy as np
 import pylab as plt
@@ -13,7 +12,8 @@ from maoppy.instrument import Instrument
 
 from scipy.signal import welch
 
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
 from aott.atmosphere_characterization_tools import find_status_runs
 from aott.frozen_flow_profiler import plot_correlation, plot_layer_maps, plot_layer_profile, read_first_batch
@@ -21,26 +21,6 @@ from aott.frozen_flow_profiler import plot_correlation, plot_layer_maps, plot_la
 
 def GetSignalPSD(signal, period):
     return welch(signal, 1 / period, nperseg=500)
-
-
-# PNG filename(s) per figures-manifest key: the whitelist RemoveFigureFiles
-# deletes from, so cleanup never touches an unrelated PNG such as a logo.
-_FIGURE_FILES = {
-    "r0": ["AtmosphereAnalysis_r0.png"],
-    "L0": ["AtmosphereAnalysis_L0.png"],
-    "tau0": ["AtmosphereAnalysis_tau0.png"],
-    "V0": ["AtmosphereAnalysis_V0.png"],
-    "loop_params": ["AtmosphereAnalysis_loop_gain.png", "AtmosphereAnalysis_loop_delay.png"],
-    "psd_comparison": ["AtmosphereAnalysis_PSD_Comparison.png"],
-    "loop_bandwidth": ["AtmosphereAnalysis_LoopBandwidth.png"],
-    "sr": ["PSFAnalysis.png"],
-    "open_loop_seeing": ["PSFAnalysis_OpenLoopSeeing.png"],
-    "psf_frames": ["PSFFrames.png"],
-    "psf_frames_openloop": ["PSFFrames_OpenLoop.png"],
-    "jitter": ["PSFJitter.png"],
-    "cog_stats": ["CoG_PSD.png", "Cumulative_Jitter.png"],
-    "frozen_flow": ["correlation.png", "layer_maps.png", "layers.png"],
-}
 
 
 def _has_data(x):
@@ -66,22 +46,34 @@ def _split_at_gaps(times_raw, gap_factor=3.0):
     return list(zip(starts.tolist(), ends.tolist()))
 
 
+def _at_wavelength(wavelength):
+    """' @ N nm' for an axis label, or '' if the wavelength (in m) is unknown."""
+    return "" if wavelength is None else f" @ {wavelength * 1e9:.0f} nm"
+
+
+def utc_datetimes(timestamps):
+    """Unix timestamps as timezone-aware UTC datetimes, for the time axes."""
+    return [datetime.fromtimestamp(t, timezone.utc) for t in timestamps]
+
+
 def _format_time_axis(ax):
-    """Label a datetime x-axis as HH:MM:SS, whatever the tick spacing."""
-    locator = mdates.AutoDateLocator()
-    formatter = mdates.AutoDateFormatter(locator)
+    """Label a datetime x-axis as HH:MM:SS UTC, whatever the tick spacing."""
+    locator = mdates.AutoDateLocator(tz=timezone.utc)
+    formatter = mdates.AutoDateFormatter(locator, tz=timezone.utc)
     for scale in (1 / mdates.HOURS_PER_DAY, 1 / mdates.MINUTES_PER_DAY, 1 / mdates.SEC_PER_DAY):
         formatter.scaled[scale] = "%H:%M:%S"
     # Sub-second ticks (very short series): keep hh:mm:ss, plus one decimal
     formatter.scaled[1 / mdates.MUSECONDS_PER_DAY] = (
-        lambda x, pos=None: mdates.num2date(x).strftime("%H:%M:%S.%f")[:-5])
+        lambda x, pos=None: mdates.num2date(x, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-5])
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(formatter)
-    ax.set_xlabel("Time")
+    ax.set_xlabel("Time (UTC)")
 
 
 class AnalysisViewer:
-    def __init__(self, file_name):
+    def __init__(self, file_name, figure_dir="."):
+        # Folder the PNGs and report_data.json are written to
+        self.figure_dir = Path(figure_dir)
         # Defaults, so a missing group or regime just skips its plots
         self.wfs_analysis = None
         self.science_analysis = None
@@ -92,14 +84,10 @@ class AnalysisViewer:
         self.wfs_iteration_times = None
         self.wfs_L0 = None
         self.wfs_L0_units = None
-        self.wfs_tau0 = None
-        self.wfs_tau0_units = None
         self.wfs_tau0_autocorrelation = None
-        self.wfs_V0 = None
         self.wfs_V0_autocorrelation = None
         self.wfs_effective_gain = None
         self.wfs_effective_delay = None
-        self.wfs_V0_units = None
         self.wfs_psd_comparison = None
         self.wfs_loop_bandwidth = None
         self.wfs_open_loop_psd = None
@@ -130,15 +118,20 @@ class AnalysisViewer:
         self.psf_wavelength = None
         self.psf_sampling = None
         self.diameter = None
+        # Wavelength of every r0 and tau0 (m)
+        self.r0_reference_wvl = None
 
         # Which figures actually got written, and small mean/std summaries of
         # the quantity each one plots -- dumped to JSON by SaveFigureManifest
         # so ao_report.typ can include exactly the sections this file has
         # data for, and print a one-line summary number next to each figure,
         # without ever referencing a PNG that was never produced.
-        self.manifest = {"figures": {}, "stats": {}}
+        self.manifest = {"figures": {}, "stats": {}, "settings": {}}
 
         with h5py.File(file_name, "r") as file:
+
+            if "Calibration" in file and "r0_reference_wvl" in file["Calibration"].attrs:
+                self.r0_reference_wvl = float(file["Calibration"].attrs["r0_reference_wvl"])
 
             if "WFS" in file:
                 wfs_grp = file["WFS"]
@@ -146,23 +139,20 @@ class AnalysisViewer:
                 if "Analysis" in wfs_grp and "r0" in wfs_grp["Analysis"]:
                     self.wfs_analysis = True
                     analysis_grp = wfs_grp["Analysis"]
+                    if "Batch_Duration_s" in analysis_grp.attrs:
+                        self.manifest["settings"]["atmosphere_batch_s"] = float(analysis_grp.attrs["Batch_Duration_s"])
                     self.wfs_r0 = analysis_grp["r0"][:]
                     self.wfs_r0_units = analysis_grp["r0"].attrs["Units"]
                     self.wfs_iteration_times_raw = analysis_grp["Iteration_Times"][:]
-                    self.wfs_iteration_times = [datetime.fromtimestamp(t) for t in self.wfs_iteration_times_raw]
+                    self.wfs_iteration_times = utc_datetimes(self.wfs_iteration_times_raw)
 
                     self.wfs_L0 = analysis_grp["L0"][:]
                     self.wfs_L0_units = analysis_grp["L0"].attrs["Units"]
 
-                    self.wfs_tau0 = analysis_grp["tau0"][:]
-                    self.wfs_tau0_units = analysis_grp["tau0"].attrs["Units"]
                     self.wfs_tau0_autocorrelation = analysis_grp["tau0_Autocorrelation"][:]
-
-                    self.wfs_V0 = analysis_grp["V0"][:]
                     self.wfs_V0_autocorrelation = analysis_grp["V0_Autocorrelation"][:]
                     self.wfs_effective_gain = analysis_grp["Effective_Gain"][:]
                     self.wfs_effective_delay = analysis_grp["Measured_Loop_Delay"][:]
-                    self.wfs_V0_units = analysis_grp["V0"].attrs["Units"]
 
                     self.wfs_psd_comparison = None
                     if "PSD_Comparison" in analysis_grp:
@@ -196,10 +186,12 @@ class AnalysisViewer:
 
                 if "Analysis" in wfs_grp and "Frozen_Flow" in wfs_grp["Analysis"]:
                     ff_grp = wfs_grp["Analysis"]["Frozen_Flow"]
+                    if "Batch_Size_Frames" in ff_grp.attrs:
+                        self.manifest["settings"]["frozen_flow_batch_frames"] = int(ff_grp.attrs["Batch_Size_Frames"])
                     times_raw = ff_grp["Iteration_Times"][:]
                     self.frozen_flow = dict(
                         iteration_times_raw=times_raw,
-                        iteration_times=[datetime.fromtimestamp(t) for t in times_raw],
+                        iteration_times=utc_datetimes(times_raw),
                         V0=ff_grp["V0"][:],
                         tau0=ff_grp["tau0"][:],
                         r0=ff_grp["r0"][:],
@@ -210,7 +202,11 @@ class AnalysisViewer:
 
             if "Science" in file:
                 sci_grp = file["Science"]
+                # The frame rate PSF_Processing used (from the frame timestamps),
+                # or the FPS attr in files analysed before it was stored
                 self.fps = sci_grp["Science_PSFs"].attrs["FPS"]
+                if "Analysis" in sci_grp and "Frame_Rate_Hz" in sci_grp["Analysis"].attrs:
+                    self.fps = float(sci_grp["Analysis"].attrs["Frame_Rate_Hz"])
 
                 if "Vmag" in sci_grp.attrs:
                     self.VMag = sci_grp.attrs["Vmag"]
@@ -224,6 +220,8 @@ class AnalysisViewer:
                 if "Analysis" in sci_grp:
                     self.science_analysis = True
                     analysis_grp = sci_grp["Analysis"]
+                    if "Batch_Duration_s" in analysis_grp.attrs:
+                        self.manifest["settings"]["psf_batch_s"] = float(analysis_grp.attrs["Batch_Duration_s"])
 
                     if "Long_Exposure" in analysis_grp:
                         long_exp_grp = analysis_grp["Long_Exposure"]
@@ -234,9 +232,7 @@ class AnalysisViewer:
                             self.long_exp_psf_model = long_exp_grp["psf_model"][:]
                             self.long_exp_psf_stack = long_exp_grp["psf_stack"][:]
                             self.long_exp_iteration_times_raw = long_exp_grp["Iteration_Times"][:]
-                            self.long_exp_iteration_times = [
-                                datetime.fromtimestamp(t) for t in self.long_exp_iteration_times_raw
-                            ]
+                            self.long_exp_iteration_times = utc_datetimes(self.long_exp_iteration_times_raw)
 
                     if "Long_Exposure_OpenLoop" in analysis_grp:
                         open_loop_grp = analysis_grp["Long_Exposure_OpenLoop"]
@@ -245,9 +241,7 @@ class AnalysisViewer:
                             self.open_loop_psf_model = open_loop_grp["psf_model"][:]
                             self.open_loop_psf_stack = open_loop_grp["psf_stack"][:]
                             self.open_loop_iteration_times_raw = open_loop_grp["Iteration_Times"][:]
-                            self.open_loop_iteration_times = [
-                                datetime.fromtimestamp(t) for t in self.open_loop_iteration_times_raw
-                            ]
+                            self.open_loop_iteration_times = utc_datetimes(self.open_loop_iteration_times_raw)
 
                     if "Short_Exposure" in analysis_grp:
                         short_exp_grp = analysis_grp["Short_Exposure"]
@@ -306,27 +300,21 @@ class AnalysisViewer:
         self.manifest["figures"][key] = True
 
     def _record_stat(self, key, values):
-        """Store mean/std of a per-batch quantity in the manifest, printed as
-        a small summary number next to that figure's caption in the report."""
+        """Store mean, std and number of finite values of a per-batch quantity
+        in the manifest, printed as a small summary next to that figure in the
+        report. Nothing is stored when no value is finite."""
         values = np.asarray(values, dtype=float)
-        self.manifest["stats"][f"{key}_mean"] = float(np.nanmean(values))
-        self.manifest["stats"][f"{key}_std"] = float(np.nanstd(values))
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return
+        self.manifest["stats"][f"{key}_mean"] = float(np.mean(values))
+        self.manifest["stats"][f"{key}_std"] = float(np.std(values))
+        self.manifest["stats"][f"{key}_n"] = int(values.size)
 
-    def SaveFigureManifest(self, path="report_data.json"):
-        with open(path, "w") as f:
+    def SaveFigureManifest(self):
+        """Write report_data.json, which ao_report.typ reads, next to the PNGs."""
+        with open(self.figure_dir / "report_data.json", "w") as f:
             json.dump(self.manifest, f, indent=2)
-
-    def RemoveFigureFiles(self):
-        """Delete every PNG this run actually wrote (per self.manifest), for
-        after ao_report.typ has compiled -- Typst embeds each image directly
-        in the PDF, so the standalone PNGs left in the working directory are
-        pure clutter at that point."""
-        for key, produced in self.manifest["figures"].items():
-            if not produced:
-                continue
-            for fname in _FIGURE_FILES.get(key, []):
-                if os.path.exists(fname):
-                    os.remove(fname)
 
     def MakeR0Plot(self):
         if (not _has_data(self.wfs_r0) and not _has_data(self.long_exp_r0) and not _has_data(self.open_loop_r0)
@@ -365,12 +353,11 @@ class AnalysisViewer:
                 linestyle="--", marker="o", linewidth=2, color="C2",
             )
             self._record_stat("r0_frozen_flow", self.frozen_flow["r0"])
-        ax.set_ylabel(f"$r_0$ @ 500 nm ({self.wfs_r0_units if self.wfs_r0_units else 'cm'})")
+        ax.set_ylabel(f"$r_0${_at_wavelength(self.r0_reference_wvl)} ({self.wfs_r0_units if self.wfs_r0_units else 'cm'})")
         _format_time_axis(ax)
         ax.legend()
 
-        fig_path = "AtmosphereAnalysis_r0.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_r0.png", bbox_inches="tight")
         self._flag_figure("r0")
 
     def MakeL0Plot(self):
@@ -385,71 +372,44 @@ class AnalysisViewer:
         ax.set_ylabel(f"$L_0$ ({self.wfs_L0_units})")
         _format_time_axis(ax)
 
-        fig_path = "AtmosphereAnalysis_L0.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_L0.png", bbox_inches="tight")
         self._flag_figure("L0")
         self._record_stat("L0", self.wfs_L0)
 
-    def MakeTau0Plot(self):
-        if not _has_data(self.wfs_tau0) and self.frozen_flow is None:
+    def _make_tau0_or_v0_plot(self, key, telemetry_values, ylabel, fig_name):
+        """tau0 or V0 against time: the frozen-flow profiler (the main
+        estimator, C0) and the autocorrelation estimator (cross-check, C1)."""
+        if self.frozen_flow is None and not _has_data(telemetry_values):
             return
         fig, ax = plt.subplots(figsize=(6, 4))
-        if _has_data(self.wfs_tau0):
-            self._plot_segmented(
-                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0,
-                label="tau0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
-            )
-            self._plot_segmented(
-                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_tau0_autocorrelation,
-                label="tau0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
-            )
-            self._record_stat("tau0", self.wfs_tau0)
-            self._record_stat("tau0_autocorrelation", self.wfs_tau0_autocorrelation)
         if self.frozen_flow is not None:
             self._plot_segmented(
                 ax, self.frozen_flow["iteration_times_raw"], self.frozen_flow["iteration_times"],
-                self.frozen_flow["tau0"], label="tau0 from frozen-flow profiler",
-                linestyle="--", marker="o", linewidth=2, color="C2",
+                self.frozen_flow[key], label=f"{key} from frozen-flow profiler",
+                linestyle="-", marker="o", linewidth=2, color="C0",
             )
-            self._record_stat("tau0_frozen_flow", self.frozen_flow["tau0"])
-        ax.set_ylabel(f"$\\tau_0$ @ 500 nm ({self.wfs_tau0_units if self.wfs_tau0_units else 'ms'})")
+            self._record_stat(f"{key}_frozen_flow", self.frozen_flow[key])
+        if _has_data(telemetry_values):
+            self._plot_segmented(
+                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, telemetry_values,
+                label=f"{key} from autocorrelation (cross-check)", linestyle="--", marker="o", linewidth=2,
+                color="C1",
+            )
+            self._record_stat(f"{key}_autocorrelation", telemetry_values)
+        ax.set_ylabel(ylabel)
         _format_time_axis(ax)
         ax.legend()
 
-        fig_path = "AtmosphereAnalysis_tau0.png"
-        fig.savefig(fig_path, bbox_inches="tight")
-        self._flag_figure("tau0")
+        fig.savefig(self.figure_dir / fig_name, bbox_inches="tight")
+        self._flag_figure(key)
+
+    def MakeTau0Plot(self):
+        self._make_tau0_or_v0_plot("tau0", self.wfs_tau0_autocorrelation,
+                                   f"$\\tau_0${_at_wavelength(self.r0_reference_wvl)} (ms)",
+                                   "AtmosphereAnalysis_tau0.png")
 
     def MakeV0Plot(self):
-        if not _has_data(self.wfs_V0) and self.frozen_flow is None:
-            return
-        fig, ax = plt.subplots(figsize=(6, 4))
-
-        if _has_data(self.wfs_V0):
-            self._plot_segmented(
-                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0,
-                label="V0 from structure function", linestyle="--", marker="o", linewidth=2, color="C0",
-            )
-            self._plot_segmented(
-                ax, self.wfs_iteration_times_raw, self.wfs_iteration_times, self.wfs_V0_autocorrelation,
-                label="V0 from autocorrelation", linestyle="--", marker="o", linewidth=2, color="C1",
-            )
-            self._record_stat("V0", self.wfs_V0)
-            self._record_stat("V0_autocorrelation", self.wfs_V0_autocorrelation)
-        if self.frozen_flow is not None:
-            self._plot_segmented(
-                ax, self.frozen_flow["iteration_times_raw"], self.frozen_flow["iteration_times"],
-                self.frozen_flow["V0"], label="V0 from frozen-flow profiler",
-                linestyle="--", marker="o", linewidth=2, color="C2",
-            )
-            self._record_stat("V0_frozen_flow", self.frozen_flow["V0"])
-        ax.set_ylabel(f"$V_0$ @ 500 nm ({self.wfs_V0_units if self.wfs_V0_units else 'm/s'})")
-        _format_time_axis(ax)
-        ax.legend()
-
-        fig_path = "AtmosphereAnalysis_V0.png"
-        fig.savefig(fig_path, bbox_inches="tight")
-        self._flag_figure("V0")
+        self._make_tau0_or_v0_plot("V0", self.wfs_V0_autocorrelation, "$V_0$ (m/s)", "AtmosphereAnalysis_V0.png")
 
     def MakeLoopParamPlots(self):
         if not _has_data(self.wfs_effective_gain):
@@ -463,8 +423,7 @@ class AnalysisViewer:
         ax.set_ylabel(f"Measured loop gain")
         _format_time_axis(ax)
 
-        fig_path = "AtmosphereAnalysis_loop_gain.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_loop_gain.png", bbox_inches="tight")
 
         fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -475,8 +434,7 @@ class AnalysisViewer:
         ax.set_ylabel(f"Measured loop delay (frames)")
         _format_time_axis(ax)
 
-        fig_path = "AtmosphereAnalysis_loop_delay.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_loop_delay.png", bbox_inches="tight")
         self._flag_figure("loop_params")
         self._record_stat("loop_gain", self.wfs_effective_gain)
         self._record_stat("loop_delay", self.wfs_effective_delay)
@@ -498,8 +456,8 @@ class AnalysisViewer:
             dm_psd = self.wfs_psd_comparison["dm_psd"][-1]
             wfs_psd = self.wfs_psd_comparison["wfs_psd"][-1]
             for i in range(len(modes)):
-                axes[i].loglog(f, dm_psd[i], label="DM-derived (closed loop, open-loop estimate)", color="C0")
-                axes[i].loglog(f, wfs_psd[i], label="WFS-derived (closed loop, residual)", color="C1")
+                axes[i].loglog(f, dm_psd[i], label="DM commands (closed loop)", color="C0")
+                axes[i].loglog(f, wfs_psd[i], label="WFS measurements (closed loop, residual)", color="C1")
 
         if self.wfs_open_loop_psd:
             # Most recent open-loop batch -- the WFS directly measures the
@@ -507,7 +465,7 @@ class AnalysisViewer:
             f_open = self.wfs_open_loop_psd["frequency"]
             psd_open = self.wfs_open_loop_psd["psd"][-1]
             for i in range(len(modes)):
-                axes[i].loglog(f_open, psd_open[i], label="WFS-derived (open loop)", color="C2", linestyle="--")
+                axes[i].loglog(f_open, psd_open[i], label="WFS measurements (open loop)", color="C2", linestyle="--")
 
         for i, mode in enumerate(modes):
             axes[i].set_title(f"mode {mode}")
@@ -515,8 +473,7 @@ class AnalysisViewer:
         axes[0].set_ylabel("PSD (rad$^2$/Hz)")
         axes[0].legend(fontsize=8)
 
-        fig_path = "AtmosphereAnalysis_PSD_Comparison.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_PSD_Comparison.png", bbox_inches="tight")
         self._flag_figure("psd_comparison")
 
     def MakeLoopBandwidthPlot(self):
@@ -535,11 +492,10 @@ class AnalysisViewer:
             orders, mean_crossover, yerr=std_crossover,
             linestyle="--", marker="o", linewidth=2, color="C0", capsize=3,
         )
-        ax.set_ylabel("Loop bandwidth (Hz)")
+        ax.set_ylabel("Controller crossover frequency (Hz)")
         ax.set_xlabel("Radial order n")
 
-        fig_path = "AtmosphereAnalysis_LoopBandwidth.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "AtmosphereAnalysis_LoopBandwidth.png", bbox_inches="tight")
         self._flag_figure("loop_bandwidth")
         self._record_stat("loop_bandwidth", crossover)
 
@@ -550,20 +506,19 @@ class AnalysisViewer:
         if self.frozen_flow_first_batch is None:
             return
         fit, speed, direction = self.frozen_flow_first_batch
-        plot_correlation(fit, "correlation.png")
-        plot_layer_maps(fit, speed, "layer_maps.png")
-        plot_layer_profile(fit.cn2, speed, direction, "layers.png")
+        plot_correlation(fit, self.figure_dir / "correlation.png")
+        plot_layer_maps(fit, speed, self.figure_dir / "layer_maps.png")
+        plot_layer_profile(fit.cn2, speed, direction, self.figure_dir / "layers.png")
         self._flag_figure("frozen_flow")
         self._record_stat("frozen_flow_layers", self.frozen_flow["n_layers"])
 
     def CreateAtmosphericAnalysisFigures(self):
+        # MakeL0Plot, MakeLoopParamPlots and MakeLoopBandwidthPlot are left
+        # out: their estimators are not validated (Validated=False attr)
         self.MakeR0Plot()
-        self.MakeL0Plot()
         self.MakeTau0Plot()
         self.MakeV0Plot()
-        self.MakeLoopParamPlots()
         self.MakePSDComparisonPlot()
-        self.MakeLoopBandwidthPlot()
         self.MakeFrozenFlowPlots()
 
     def MakeSRPlot(self):
@@ -575,11 +530,10 @@ class AnalysisViewer:
             ax, self.long_exp_iteration_times_raw, self.long_exp_iteration_times, self.long_exp_sr_fit,
             linestyle="--", marker="o", linewidth=2, color="C0",
         )
-        ax.set_ylabel(f"Strehl ratio @ {self.psf_wavelength * 1e9:.0f} nm")
+        ax.set_ylabel(f"Strehl ratio @ {self.psf_wavelength * 1e9:.0f} nm (%)")
         _format_time_axis(ax)
 
-        fig_path = "PSFAnalysis.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "PSFAnalysis.png", bbox_inches="tight")
         self._flag_figure("sr")
         self._record_stat("sr", self.long_exp_sr_fit)
 
@@ -592,11 +546,10 @@ class AnalysisViewer:
             ax, self.open_loop_iteration_times_raw, self.open_loop_iteration_times, self.open_loop_r0 * 100,
             linestyle="--", marker="o", linewidth=2, color="C0",
         )
-        ax.set_ylabel(f"$r_0$ @ 500 nm (cm), open loop")
+        ax.set_ylabel(f"$r_0${_at_wavelength(self.r0_reference_wvl)} (cm), open loop")
         _format_time_axis(ax)
 
-        fig_path = "PSFAnalysis_OpenLoopSeeing.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "PSFAnalysis_OpenLoopSeeing.png", bbox_inches="tight")
         self._flag_figure("open_loop_seeing")
         self._record_stat("open_loop_seeing_r0", self.open_loop_r0 * 100)
 
@@ -674,11 +627,12 @@ class AnalysisViewer:
         # long_exp_*, never open_loop_*.
         self._make_psf_extremes_figure(
             self.long_exp_psf_stack, self.long_exp_psf_model, self.long_exp_sr_fit,
-            "PSFFrames.png", row_labels=["min SR", "max SR"],
+            self.figure_dir / "PSFFrames.png", row_labels=["min SR", "max SR"],
         )
         self._flag_figure("psf_frames")
-        self.manifest["stats"]["sr_min"] = float(np.nanmin(self.long_exp_sr_fit))
-        self.manifest["stats"]["sr_max"] = float(np.nanmax(self.long_exp_sr_fit))
+        if np.isfinite(self.long_exp_sr_fit).any():
+            self.manifest["stats"]["sr_min"] = float(np.nanmin(self.long_exp_sr_fit))
+            self.manifest["stats"]["sr_max"] = float(np.nanmax(self.long_exp_sr_fit))
 
     def MakePSFImageOpenLoop(self):
         if not _has_data(self.open_loop_r0):
@@ -687,11 +641,12 @@ class AnalysisViewer:
         # seeing = "best", smaller r0 = "worst").
         self._make_psf_extremes_figure(
             self.open_loop_psf_stack, self.open_loop_psf_model, self.open_loop_r0,
-            "PSFFrames_OpenLoop.png", row_labels=["worst r0", "best r0"],
+            self.figure_dir / "PSFFrames_OpenLoop.png", row_labels=["worst r0", "best r0"],
         )
         self._flag_figure("psf_frames_openloop")
-        self.manifest["stats"]["open_loop_r0_frames_min"] = float(np.nanmin(self.open_loop_r0) * 100)
-        self.manifest["stats"]["open_loop_r0_frames_max"] = float(np.nanmax(self.open_loop_r0) * 100)
+        if np.isfinite(self.open_loop_r0).any():
+            self.manifest["stats"]["open_loop_r0_frames_min"] = float(np.nanmin(self.open_loop_r0) * 100)
+            self.manifest["stats"]["open_loop_r0_frames_max"] = float(np.nanmax(self.open_loop_r0) * 100)
 
     def CreatePSFAnalysisFigures(self):
         self.MakeSRPlot()
@@ -734,8 +689,7 @@ class AnalysisViewer:
         ax.set_ylabel("Jitter ($\\lambda/D$)")
         _format_time_axis(ax)
         ax.legend()
-        fig_path = "PSFJitter.png"
-        fig.savefig(fig_path, bbox_inches="tight")
+        fig.savefig(self.figure_dir / "PSFJitter.png", bbox_inches="tight")
         self._flag_figure("jitter")
 
     def MakeCoGStatsPlots(self):
@@ -782,12 +736,12 @@ class AnalysisViewer:
         ax_psd.set_xlabel("Frequency (Hz)")
         ax_psd.set_ylabel("PSD ( $(\\lambda/D)^2/Hz$ )")
         ax_psd.legend()
-        fig_psd.savefig("CoG_PSD.png", bbox_inches="tight")
+        fig_psd.savefig(self.figure_dir / "CoG_PSD.png", bbox_inches="tight")
 
         ax_cum.set_xlabel("Frequency (Hz)")
         ax_cum.set_ylabel("Cumulative jitter $(\\lambda/D)$")
         ax_cum.legend()
         if f_for_xlim is not None:
             ax_cum.set_xlim(f_for_xlim[1], f_for_xlim[-1])
-        fig_cum.savefig("Cumulative_Jitter.png", bbox_inches="tight")
+        fig_cum.savefig(self.figure_dir / "Cumulative_Jitter.png", bbox_inches="tight")
         self._flag_figure("cog_stats")

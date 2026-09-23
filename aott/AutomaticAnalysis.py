@@ -1,163 +1,96 @@
+"""
+Analyse one observation file and compile its report:
+
+    python -m aott.AutomaticAnalysis [file.hdf5]
+
+Without a file, the newest observation not yet analysed is used (see
+aott.observation_files.newest_file). python -m aott.observe grabs a new
+observation and calls analyze_and_report on it.
+"""
 from aott.PSF_Processing import PSF_Processing
 from aott.Atmosphere_Characterization import Atmosphere_Characterization
 from aott.AnalysisViewer import AnalysisViewer
 from aott.frozen_flow_profiler import ProfilerInputError, profile_file, save_results
-from aott.config import DATA_GRABBER_FILE
+from aott.observation_files import newest_file, observation_span, output_dirs, telescope_name, utc_date
+from aott.report import compile_report, copy_logo, new_run_dir
 from pathlib import Path
-import subprocess
-import numpy as np
-import pylab as plt
-import shutil
+import argparse
+import h5py
 
-from datetime import datetime
-
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    import tomli as tomllib
+from datetime import datetime, timezone
 
 
-DATE = datetime.now().strftime("%Y-%m-%d")
+def analyze_and_report(file_name, report_dir):
+    """
+    Run the PSF analysis, the atmosphere characterization and the frozen-flow
+    profiler on `file_name` (settings from config/analysis.toml), then compile
+    its report to report_dir/<UTC date of the observation start>/. Returns the
+    PDF path, or None if the compile failed.
+    """
+    file_name = Path(file_name)
 
-# Where to find the newest HDF5 file and where to write the compiled PDF --
-# read from the [output] section of config/data_grabber.toml, so this
-# script and aott/telemetry.py agree on these paths.
-with open(DATA_GRABBER_FILE, "rb") as _f:
-    _output_config = tomllib.load(_f)["output"]
-hdf5_dir = Path(_output_config["hdf5_dir"])
-report_dir = Path(_output_config["report_dir"])
+    # UTC date of the observation start, like the hdf5_dir/<date> folder telemetry.py writes it to
+    with h5py.File(file_name, "r") as file:
+        span = observation_span(file)
+        telescope = telescope_name(file) or "Unknown telescope"
+    date = utc_date(span[0]) if span is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    psf = PSF_Processing(file_name)
+    psf.SetPSFModel()
+    psf.AnalyzeAllTheFile()
 
-# hdf5_dir holds one dated subfolder per day of observations; fall back to
-# hdf5_dir itself if that subfolder doesn't exist, e.g. local test data
-# sitting directly in hdf5_dir with no date structure.
-analysis_folder = hdf5_dir / DATE
-if not analysis_folder.is_dir():
-    analysis_folder = hdf5_dir
-latest_file = max(analysis_folder.iterdir(), key=lambda f: f.stat().st_mtime)
-print(latest_file)
+    atm_char = Atmosphere_Characterization(file_name)
+    atm_char.AnalyzeAllTheFile()
 
+    # Frozen-flow profiler, closed-loop runs only
+    try:
+        save_results(file_name, profile_file(file_name))
+    except ProfilerInputError as e:
+        print(f"Frozen-flow profiler skipped: {e}")
 
-# Frames skipped after each open/closed-loop transition while the loop settles
-# (science frames for PSF_Processing, loop iterations for Atmosphere_Characterization)
-PSF_TRANSITION_BUFFER = 20
-WFS_TRANSITION_BUFFER = 20
+    # PNGs and report_data.json go to a temporary folder of this run's own,
+    # where compile_report also compiles the template
+    run_dir = new_run_dir("ao_report_")
+    av = AnalysisViewer(file_name, figure_dir=run_dir)
+    av.CreateAtmosphericAnalysisFigures()
+    av.CreatePSFAnalysisFigures()
+    av.SaveFigureManifest()
 
-p2 = PSF_Processing(latest_file, batch_duration=1, transition_buffer=PSF_TRANSITION_BUFFER)
-p2.SetPSFModel()
-p2.AnalyzeAllTheFile()
+    inputs = {
+        "AOtitle": file_name.stem,
+        "telescope": telescope,
+        "date": date,
+        # Science.attrs["Target"], read by PSF_Processing
+        "target": str(psf.target_name),
+        "elevation": f"{psf.elevation:.1f}",
+        "loop_gain": f"{atm_char.loop_gain:.3f}",
+        "loop_leak": f"{atm_char.loop_leak:.3f}",
+        "loop_freq": f"{atm_char.freq:.1f}",
+        "logo": copy_logo(run_dir),
+    }
+    if av.VMag:
+        inputs.update(VMag=f"{av.VMag:.2f}", RMag=f"{av.RMag:.2f}", JMag=f"{av.JMag:.2f}", HMag=f"{av.HMag:.2f}")
+    else:
+        inputs.update(VMag="none", RMag="none", JMag="none", HMag="none")
 
-
-atm_char = Atmosphere_Characterization(latest_file, batch_duration=1.0, filter_TT=False,
-                                       transition_buffer=WFS_TRANSITION_BUFFER)
-atm_char.AnalyzeAllTheFile()
-
-
-# Frozen-flow profiler, closed-loop runs only: batches of min(run length,
-# FROZEN_FLOW_MAX_BATCH) frames, and a lag range long enough for a layer at
-# FROZEN_FLOW_MIN_SPEED to move FROZEN_FLOW_LAG_PITCHES actuator pitches
-FROZEN_FLOW_MAX_BATCH = 5000
-FROZEN_FLOW_MIN_SPEED = 1.0  # m/s
-FROZEN_FLOW_LAG_PITCHES = 2
-
-try:
-    frozen_flow = profile_file(latest_file, signal="dm", batch_size=FROZEN_FLOW_MAX_BATCH,
-                               min_speed=FROZEN_FLOW_MIN_SPEED, lag_pitches=FROZEN_FLOW_LAG_PITCHES,
-                               transition_buffer=WFS_TRANSITION_BUFFER)
-    save_results(latest_file, frozen_flow)
-except ProfilerInputError as e:
-    print(f"Frozen-flow profiler skipped: {e}")
-
-
-av = AnalysisViewer(latest_file)
-
-av.CreateAtmosphericAnalysisFigures()
-av.CreatePSFAnalysisFigures()
-av.SaveFigureManifest()
+    return compile_report("ao_report.typ", run_dir,
+                          Path(report_dir) / date / f"ao_report{file_name.stem}.pdf", inputs)
 
 
-file_title = latest_file.stem
-# Science.attrs["Target"], read by PSF_Processing
-target_name = str(p2.target_name)
+def main():
+    parser = argparse.ArgumentParser(description="Analyse one observation and compile its report.")
+    parser.add_argument("file", nargs="?",
+                        help="observation HDF5 file (default: the newest one not yet analysed, in today's "
+                             "and yesterday's UTC date folders of the [output] hdf5_dir)")
+    args = parser.parse_args()
 
-# Dropped in later by hand at the repo root; "none" tells the template to
-# leave the logo slot out of the header instead of trying to load it.
-logo_path = Path("logo.png")
-
-cmd = [
-    "typst",
-    "compile",
-    "ao_report.typ",
-    "ao_report" + file_title + ".pdf",
-    "--input",
-    "AOtitle=" + file_title,
-    "--input",
-    "telescope=T152-Papyrus",
-    "--input",
-    "date=" + DATE,
-    "--input",
-    "target=" + target_name,
-    "--input",
-    f"elevation={p2.elevation:.1f}",
-    "--input",
-    f"loop_gain={atm_char.loop_gain:.3f}",
-    "--input",
-    f"loop_leak={atm_char.loop_leak:.3f}",
-    "--input",
-    f"loop_freq={atm_char.freq:.1f}",
-    "--input",
-    "logo=" + (logo_path.name if logo_path.exists() else "none"),
-]
-
-if av.VMag:
-    cmd += [
-        "--input",
-        f"VMag={av.VMag:.2f}",
-        "--input",
-        f"RMag={av.RMag:.2f}",
-        "--input",
-        f"JMag={av.JMag:.2f}",
-        "--input",
-        f"HMag={av.HMag:.2f}",
-    ]
-else:
-    cmd += [
-        "--input",
-        "VMag=none",
-        "--input",
-        "RMag=none",
-        "--input",
-        "JMag=none",
-        "--input",
-        "HMag=none",
-    ]
-
-try:
-    result = subprocess.run(
-        cmd,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    print(result.stdout)
-    # Typst has embedded each PNG directly in the PDF by this point, so the
-    # standalone files are no longer needed. Left in place on a failed
-    # compile, since they're useful for debugging what went wrong.
-    av.RemoveFigureFiles()
-except subprocess.CalledProcessError as e:
-    print("STDOUT:")
-    print(e.stdout)
-    print("\nSTDERR:")
-    print(e.stderr)
-
-print("ao_report" + file_title + ".pdf")
+    # hdf5_dir and report_dir come from the [output] section of
+    # config/data_grabber.toml, so this script and aott/telemetry.py agree on them.
+    hdf5_dir, report_dir = output_dirs()
+    file_name = Path(args.file) if args.file else newest_file(hdf5_dir, unanalysed_only=True)
+    print(file_name)
+    analyze_and_report(file_name, report_dir)
 
 
-report_file_name = Path("ao_report" + file_title + ".pdf")
-save_folder = report_dir / DATE
-save_folder.mkdir(parents=True, exist_ok=True)
-
-shutil.move(str(report_file_name), str(save_folder / report_file_name.name))
-
-
-
+if __name__ == "__main__":
+    main()

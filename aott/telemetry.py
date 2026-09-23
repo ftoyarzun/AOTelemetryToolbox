@@ -7,7 +7,7 @@ observation HDF5 file, with the same layout as simulation/DataGeneration.ipynb:
 Settings come from config/data_grabber.toml and config/instrument.toml (see aott/config.py).
 The file is written to <hdf5_dir>/<UTC date>/<target>_<UTC date>T<HH-MM-SS>.hdf5, time
 of the start of the acquisition. The analysis and the report are run separately
-(python -m aott.AutomaticAnalysis).
+(python -m aott.AutomaticAnalysis), or together with the grab by python -m aott.observe.
 """
 import argparse
 import datetime
@@ -91,27 +91,25 @@ def ActuatorsFirst(matrix, n_act, name):
     sys.exit(f"{name}: can't tell which axis holds the {n_act} DM actuators in shape {matrix.shape}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Grab telemetry and PSFs and write the observation HDF5 file.")
-    parser.add_argument("target", type=str, help="name of the target, as SIMBAD knows it")
-    parser.add_argument("duration", type=float, help="acquisition time in seconds")
-    parser.add_argument("--no-simbad", action="store_true",
-                        help="grab without the SIMBAD query: no magnitudes or coordinates, NaN elevation")
-    args = parser.parse_args()
-
+def acquire(target, duration, no_simbad=False):
+    """
+    Grab `duration` seconds of telemetry and PSFs of `target`, write the
+    observation HDF5 file and return its path. Exits before grabbing if the
+    config is incomplete or, unless `no_simbad`, SIMBAD doesn't know the target.
+    """
     config = LoadConfig()
     instrument = LoadInstrument()
 
     # Query SIMBAD before grabbing, so a typo in the target name is caught before any data is taken
     star = None
-    if not args.no_simbad:
+    if not no_simbad:
         try:
-            star = QueryTarget(args.target)
+            star = QueryTarget(target)
         except Exception as e:
             sys.exit(f"SIMBAD query failed ({e}). Pass --no-simbad to grab anyway.")
         if star is None:
-            sys.exit(f"SIMBAD doesn't know '{args.target}'. Check the name, or pass --no-simbad to grab anyway.")
-        print(f"{args.target}: SIMBAD {star['main_id']}, V = {star['V']}")
+            sys.exit(f"SIMBAD doesn't know '{target}'. Check the name, or pass --no-simbad to grab anyway.")
+        print(f"{target}: SIMBAD {star['main_id']}, V = {star['V']}")
 
     shm_paths = config["shm"]
     wfs_frames_shm = dao.shm(shm_paths["wfs"]["frames"])
@@ -158,8 +156,9 @@ def main():
              Stream(loop_cmd_shm)],
             [Stream(psf_shm, window=psf_window)],
         ],
-        args.duration,
+        duration,
         sem_nb,
+        rates=[wfs_fps, sci_fps],
     )
 
     print(f"WFS Camera: {len(wfs_rec.timestamps)} frames")
@@ -180,7 +179,7 @@ def main():
 
     save_folder = Path(config["output"]["hdf5_dir"]) / f"{start:%Y-%m-%d}"
     save_folder.mkdir(parents=True, exist_ok=True)
-    safe_target = re.sub(r"[^A-Za-z0-9+.-]+", "_", args.target).strip("_")
+    safe_target = re.sub(r"[^A-Za-z0-9+.-]+", "_", target).strip("_")
     hdf5_path = save_folder / f"{safe_target}_{start:%Y-%m-%dT%H-%M-%S}.hdf5"
 
     with h5py.File(hdf5_path, "w-") as file:
@@ -203,13 +202,13 @@ def main():
         grp_wfs.create_dataset("DM_commands", data=dm_commands)
         grp_wfs.create_dataset("DM_TimeStamps", data=wfs_rec.timestamps)
         grp_wfs.create_dataset("WFS_measurements", data=wfs_measurements)
-        # Loop command at every loop iteration. The notebook stores it as the loop_status attribute,
-        # a dataset here because attributes are limited to 64 kB. The analysis derives the
-        # open/closed status from the DM commands and doesn't read it.
+        # Loop command at every loop iteration (nonzero = closed loop), the open/closed status
+        # the analysis reads. The notebook stores it as the loop_status attribute, a dataset
+        # here because attributes are limited to 64 kB.
         grp_wfs.create_dataset("loop_status", data=loop_status)
 
         grp_science = file.create_group("Science")
-        grp_science.attrs["Target"] = args.target
+        grp_science.attrs["Target"] = target
         # degrees, at the start of the acquisition
         grp_science.attrs["Elevation"] = elevation
         if star is not None:
@@ -252,6 +251,17 @@ def main():
             file["Calibration/Interaction_Matrix"].attrs["Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
 
     print(hdf5_path)
+    return hdf5_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Grab telemetry and PSFs and write the observation HDF5 file.")
+    parser.add_argument("target", type=str, help="name of the target, as SIMBAD knows it")
+    parser.add_argument("duration", type=float, help="acquisition time in seconds")
+    parser.add_argument("--no-simbad", action="store_true",
+                        help="grab without the SIMBAD query: no magnitudes or coordinates, NaN elevation")
+    args = parser.parse_args()
+    acquire(args.target, args.duration, args.no_simbad)
 
 
 if __name__ == "__main__":

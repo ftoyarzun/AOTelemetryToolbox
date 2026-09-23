@@ -1,22 +1,16 @@
 import h5py
 import json
-import os
-import shutil
-import subprocess
 
 import numpy as np
 import pylab as plt
 import matplotlib.dates as mdates
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aott.AnalysisViewer import _format_time_axis
-
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    import tomli as tomllib
+from aott.AnalysisViewer import _format_time_axis, utc_datetimes
+from aott.observation_files import date_folders, hdf5_files, observation_span, output_dirs, telescope_name
+from aott.report import compile_report, copy_logo, new_run_dir
 
 
 # Every per-batch quantity the nightly report summarizes, as
@@ -24,16 +18,15 @@ except ImportError:  # Python < 3.11
 # the per-target tables and nightly_report.typ; scale converts to the units
 # the per-observation report shows (PSF r0 is stored in m, shown in cm).
 _QUANTITIES = [
-    ("r0_wfs", "WFS/Analysis/r0", None, 1.0),
-    ("r0_psf_closed", "Science/Analysis/Long_Exposure/r0", None, 100.0),
-    ("r0_psf_open", "Science/Analysis/Long_Exposure_OpenLoop/r0", None, 100.0),
+    # r0 and tau0 at zenith, so observations at different elevations compare
+    ("r0_wfs", "WFS/Analysis/r0_Zenith", None, 1.0),
+    ("r0_psf_closed", "Science/Analysis/Long_Exposure/r0_Zenith", None, 100.0),
+    ("r0_psf_open", "Science/Analysis/Long_Exposure_OpenLoop/r0_Zenith", None, 100.0),
     ("L0", "WFS/Analysis/L0", None, 1.0),
-    ("tau0", "WFS/Analysis/tau0", None, 1.0),
-    ("tau0_autocorrelation", "WFS/Analysis/tau0_Autocorrelation", None, 1.0),
-    ("V0", "WFS/Analysis/V0", None, 1.0),
-    ("V0_autocorrelation", "WFS/Analysis/V0_Autocorrelation", None, 1.0),
-    ("tau0_frozen_flow", "WFS/Analysis/Frozen_Flow/tau0", None, 1.0),
+    ("tau0_frozen_flow", "WFS/Analysis/Frozen_Flow/tau0_Zenith", None, 1.0),
+    ("tau0_autocorrelation", "WFS/Analysis/tau0_Autocorrelation_Zenith", None, 1.0),
     ("V0_frozen_flow", "WFS/Analysis/Frozen_Flow/V0", None, 1.0),
+    ("V0_autocorrelation", "WFS/Analysis/V0_Autocorrelation", None, 1.0),
     ("sr", "Science/Analysis/Long_Exposure/sr_fit", None, 1.0),
     ("jitter_x_closed", "Science/Analysis/Short_Exposure/Jitter", 0, 1.0),
     ("jitter_y_closed", "Science/Analysis/Short_Exposure/Jitter", 1, 1.0),
@@ -41,17 +34,14 @@ _QUANTITIES = [
     ("jitter_y_open", "Science/Analysis/Short_Exposure/Jitter_OpenLoop", 1, 1.0),
 ]
 
-# PNG filename(s) per figures-manifest key, for RemoveFigureFiles -- an
-# explicit whitelist, same reasoning as AnalysisViewer._FIGURE_FILES. The
-# "Nightly_" prefix keeps them apart from the per-observation PNGs, which are
-# written to the same working directory.
+# PNG filename per figures-manifest key, as nightly_report.typ loads it
 _FIGURE_FILES = {
-    "r0": ["Nightly_r0.png"],
-    "L0": ["Nightly_L0.png"],
-    "tau0": ["Nightly_tau0.png"],
-    "V0": ["Nightly_V0.png"],
-    "sr": ["Nightly_Strehl.png"],
-    "jitter": ["Nightly_Jitter.png"],
+    "r0": "Nightly_r0.png",
+    "L0": "Nightly_L0.png",
+    "tau0": "Nightly_tau0.png",
+    "V0": "Nightly_V0.png",
+    "sr": "Nightly_Strehl.png",
+    "jitter": "Nightly_Jitter.png",
 }
 
 
@@ -67,23 +57,9 @@ def _robust_summary(values):
 
 
 def _observation_time(file):
-    """
-    Unix timestamp at the middle of an observation: the midpoint of the first
-    and last WFS/DM_TimeStamps sample (falling back to Science's
-    PSF_TimeStamps dataset, or attr in older files). Only two samples are read,
-    so checking a file against the report window stays cheap however long the
-    observation is.
-    """
-    for path in ("WFS/DM_TimeStamps", "Science/PSF_TimeStamps"):
-        if path in file:
-            ts = file[path]
-            if ts.shape[0] > 0:
-                return 0.5 * (float(ts[0]) + float(ts[-1]))
-    if "Science" in file and "PSF_TimeStamps" in file["Science"].attrs:
-        ts = np.asarray(file["Science"].attrs["PSF_TimeStamps"], dtype=float)
-        if ts.size > 0:
-            return 0.5 * (float(ts[0]) + float(ts[-1]))
-    return None
+    """Unix timestamp at the middle of an observation (see observation_span), or None."""
+    span = observation_span(file)
+    return None if span is None else 0.5 * (span[0] + span[1])
 
 
 class NightlyReport:
@@ -96,11 +72,16 @@ class NightlyReport:
     without them are listed in the report, not analyzed here.
     """
 
-    def __init__(self, hdf5_dir, window_hours=20, end_time=None, telescope="T152-Papyrus"):
+    def __init__(self, hdf5_dir, window_hours=20, end_time=None, telescope=None, figure_dir=None):
         self.hdf5_dir = Path(hdf5_dir)
+        # Folder the PNGs and the manifest are written to, and the report compiled in
+        self.figure_dir = Path(figure_dir) if figure_dir is not None else new_run_dir("nightly_report_")
         self.window_hours = window_hours
-        self.end_time = end_time if end_time is not None else datetime.now()
+        # In UTC, like the date folders; a naive end_time is read as local time
+        self.end_time = (end_time.astimezone(timezone.utc) if end_time is not None
+                         else datetime.now(timezone.utc))
         self.start_time = self.end_time - timedelta(hours=window_hours)
+        # Default: the Telescope and Instrument attrs of the observations
         self.telescope = telescope
 
         # One dict per analyzed observation in the window, sorted by time
@@ -113,22 +94,11 @@ class NightlyReport:
 
     def _candidate_files(self):
         """
-        HDF5 files in the hdf5_dir/<date> folders the window touches (an
+        HDF5 files in the hdf5_dir/<UTC date> folders the window touches (an
         observing night spans two dates), or directly in hdf5_dir if none of
-        those folders exist -- same fallback as AutomaticAnalysis.py, for a
-        flat folder of test data.
+        those folders exist, for a flat folder of test data.
         """
-        folders = []
-        day = self.start_time.date()
-        while day <= self.end_time.date():
-            folder = self.hdf5_dir / day.strftime("%Y-%m-%d")
-            if folder.is_dir():
-                folders.append(folder)
-            day += timedelta(days=1)
-        if not folders:
-            folders = [self.hdf5_dir]
-        return sorted(f for folder in folders for f in folder.iterdir()
-                      if f.suffix.lower() in (".hdf5", ".h5"))
+        return hdf5_files(date_folders(self.hdf5_dir, self.start_time.timestamp(), self.end_time.timestamp()))
 
     def _collect_observations(self):
         start, end = self.start_time.timestamp(), self.end_time.timestamp()
@@ -148,6 +118,9 @@ class NightlyReport:
             except OSError as e:
                 self.skipped.append((path.name, f"could not be opened ({e})"))
         self.observations.sort(key=lambda o: o["time"])
+        if self.telescope is None:
+            names = sorted({o["telescope"] for o in self.observations if o["telescope"]})
+            self.telescope = ", ".join(names) if names else "Unknown telescope"
 
     def _load_observation(self, file, path, obs_time):
         sci_attrs = file["Science"].attrs if "Science" in file else {}
@@ -158,6 +131,9 @@ class NightlyReport:
         wavelength = None
         if "Science/Science_PSFs" in file and "Wavelength" in file["Science/Science_PSFs"].attrs:
             wavelength = float(file["Science/Science_PSFs"].attrs["Wavelength"])
+        r0_reference_wvl = None
+        if "Calibration" in file and "r0_reference_wvl" in file["Calibration"].attrs:
+            r0_reference_wvl = float(file["Calibration"].attrs["r0_reference_wvl"])
 
         stats = {}
         for key, dataset, column, scale in _QUANTITIES:
@@ -172,10 +148,12 @@ class NightlyReport:
 
         return dict(
             file=path.name,
+            telescope=telescope_name(file),
             target=str(sci_attrs["Target"]) if "Target" in sci_attrs else path.stem,
             time=obs_time,
             mags=mags,
             wavelength=wavelength,
+            r0_reference_wvl=r0_reference_wvl,
             stats=stats,
         )
 
@@ -186,7 +164,7 @@ class NightlyReport:
         observations = [o for o in self.observations if key in o["stats"]]
         if not observations:
             return False
-        times = [datetime.fromtimestamp(o["time"]) for o in observations]
+        times = utc_datetimes([o["time"] for o in observations])
         median = np.array([o["stats"][key]["median"] for o in observations])
         q25 = np.array([o["stats"][key]["q25"] for o in observations])
         q75 = np.array([o["stats"][key]["q75"] for o in observations])
@@ -199,7 +177,7 @@ class NightlyReport:
         'estimator' as in the per-observation report: a minor tick at every
         observation, and a labeled tick at the first observation of each run
         of consecutive observations of the same target."""
-        times = [mdates.date2num(datetime.fromtimestamp(o["time"])) for o in self.observations]
+        times = mdates.date2num(utc_datetimes([o["time"] for o in self.observations]))
         first_of_run = [i for i, o in enumerate(self.observations)
                         if i == 0 or o["target"] != self.observations[i - 1]["target"]]
         top = ax.secondary_xaxis("top")
@@ -233,23 +211,35 @@ class NightlyReport:
                 ax.set_yscale("log")
 
         margin = timedelta(minutes=15)
-        ax.set_xlim(datetime.fromtimestamp(self.observations[0]["time"]) - margin,
-                    datetime.fromtimestamp(self.observations[-1]["time"]) + margin)
+        first, last = utc_datetimes([self.observations[0]["time"], self.observations[-1]["time"]])
+        ax.set_xlim(first - margin, last + margin)
         ax.set_ylabel(ylabel)
         _format_time_axis(ax)
         self._annotate_targets(ax)
         ax.legend(fontsize=8)
 
-        fig.savefig(_FIGURE_FILES[figure_key][0], bbox_inches="tight")
+        fig.savefig(self.figure_dir / _FIGURE_FILES[figure_key], bbox_inches="tight")
         plt.close(fig)
         self.figures[figure_key] = True
 
+    def _common_wavelength(self, field, keys):
+        """' @ N nm' for an axis label if every observation with one of the
+        quantity `keys` has the same `field` wavelength (rounded to nm, so
+        float noise in the stored attr doesn't split it), else ''."""
+        wavelengths = {None if o[field] is None else round(o[field] * 1e9)
+                       for o in self.observations if any(k in o["stats"] for k in keys)}
+        if len(wavelengths) == 1 and None not in wavelengths:
+            return f" @ {wavelengths.pop()} nm"
+        return ""
+
     def MakeR0Plot(self):
-        self._make_evolution_plot("r0", [
+        series = [
             ("r0_wfs", "r0 from AO telemetry", "C0", "o"),
             ("r0_psf_closed", "r0 from PSF processing (closed loop)", "C1", "o"),
             ("r0_psf_open", "r0 from PSF processing (open loop)", "C1", "s"),
-        ], "$r_0$ @ 500 nm (cm)")
+        ]
+        wavelength = self._common_wavelength("r0_reference_wvl", [s[0] for s in series])
+        self._make_evolution_plot("r0", series, f"$r_0${wavelength}, zenith (cm)")
 
     def MakeL0Plot(self):
         self._make_evolution_plot("L0", [
@@ -257,30 +247,24 @@ class NightlyReport:
         ], "$L_0$ (m)")
 
     def MakeTau0Plot(self):
-        self._make_evolution_plot("tau0", [
-            ("tau0", "tau0 from structure function", "C0", "o"),
-            ("tau0_autocorrelation", "tau0 from autocorrelation", "C1", "o"),
-            ("tau0_frozen_flow", "tau0 from frozen-flow profiler", "C2", "o"),
-        ], "$\\tau_0$ @ 500 nm (ms)")
+        # Frozen-flow profiler first, in C0: the main tau0/V0 estimator
+        series = [
+            ("tau0_frozen_flow", "tau0 from frozen-flow profiler", "C0", "o"),
+            ("tau0_autocorrelation", "tau0 from autocorrelation (cross-check)", "C1", "o"),
+        ]
+        wavelength = self._common_wavelength("r0_reference_wvl", [s[0] for s in series])
+        self._make_evolution_plot("tau0", series, f"$\\tau_0${wavelength}, zenith (ms)")
 
     def MakeV0Plot(self):
         self._make_evolution_plot("V0", [
-            ("V0", "V0 from structure function", "C0", "o"),
-            ("V0_autocorrelation", "V0 from autocorrelation", "C1", "o"),
-            ("V0_frozen_flow", "V0 from frozen-flow profiler", "C2", "o"),
-        ], "$V_0$ @ 500 nm (m/s)")
+            ("V0_frozen_flow", "V0 from frozen-flow profiler", "C0", "o"),
+            ("V0_autocorrelation", "V0 from autocorrelation (cross-check)", "C1", "o"),
+        ], "$V_0$ (m/s)")
 
     def MakeStrehlPlot(self):
-        # Science wavelength in the label only if every observation shares it
-        # (rounded to nm, so float noise in the stored attr doesn't split it)
-        wavelengths = {None if o["wavelength"] is None else round(o["wavelength"] * 1e9)
-                       for o in self.observations if "sr" in o["stats"]}
-        ylabel = "Strehl ratio"
-        if len(wavelengths) == 1 and None not in wavelengths:
-            ylabel += f" @ {wavelengths.pop()} nm"
         self._make_evolution_plot("sr", [
             ("sr", "Strehl ratio (closed loop)", "C0", "o"),
-        ], ylabel)
+        ], "Strehl ratio" + self._common_wavelength("wavelength", ["sr"]) + " (%)")
 
     def MakeJitterPlot(self, log_ratio=10):
         # Color = axis, marker = loop status, as in AnalysisViewer.MakeJitterPlot
@@ -292,8 +276,9 @@ class NightlyReport:
         ], "Jitter ($\\lambda/D$)", log_ratio=log_ratio)
 
     def CreateFigures(self):
+        # MakeL0Plot is left out: the L0 estimator is not validated
+        # (Validated=False attr)
         self.MakeR0Plot()
-        self.MakeL0Plot()
         self.MakeTau0Plot()
         self.MakeV0Plot()
         self.MakeStrehlPlot()
@@ -323,14 +308,15 @@ class NightlyReport:
             summaries.append(dict(name=name, n_obs=len(observations), mags=mags, stats=stats))
         return summaries
 
-    def SaveManifest(self, path="nightly_report_data.json", logo="none"):
+    def SaveManifest(self, logo="none"):
         """Everything nightly_report.typ needs -- metadata, which figures
-        exist, the per-target tables and the skipped files -- in one JSON."""
+        exist, the per-target tables and the skipped files -- in one JSON,
+        nightly_report_data.json next to the PNGs."""
         manifest = dict(
             telescope=self.telescope,
             date=self.end_time.strftime("%Y-%m-%d"),
-            window_start=self.start_time.strftime("%Y-%m-%d %H:%M"),
-            window_end=self.end_time.strftime("%Y-%m-%d %H:%M"),
+            window_start=self.start_time.strftime("%Y-%m-%d %H:%M UTC"),
+            window_end=self.end_time.strftime("%Y-%m-%d %H:%M UTC"),
             window_hours=self.window_hours,
             logo=logo,
             n_observations=len(self.observations),
@@ -338,57 +324,26 @@ class NightlyReport:
             targets=self.TargetSummaries(),
             skipped=[dict(file=name, reason=reason) for name, reason in self.skipped],
         )
-        with open(path, "w") as f:
+        with open(self.figure_dir / "nightly_report_data.json", "w") as f:
             json.dump(manifest, f, indent=2)
 
-    def RemoveFigureFiles(self):
-        for key, produced in self.figures.items():
-            if not produced:
-                continue
-            for fname in _FIGURE_FILES.get(key, []):
-                if os.path.exists(fname):
-                    os.remove(fname)
-
-    def CompileReport(self, report_dir, template="nightly_report.typ"):
+    def CompileReport(self, report_dir):
         """
-        Write the manifest, compile `template` with Typst and move the PDF to
-        report_dir/<date>/. Like AutomaticAnalysis.py, run from the repo root:
-        the template loads the PNGs and the JSON by bare filename. Returns the
-        PDF path, or None if the compile failed (PNGs are then left in place
-        for debugging).
+        Write the manifest, compile nightly_report.typ next to the PNGs and
+        move the PDF to report_dir/<date>/ (see aott.report.compile_report).
+        Returns the PDF path, or None if the compile failed.
         """
-        logo_path = Path("logo.png")
-        self.SaveManifest(logo=logo_path.name if logo_path.exists() else "none")
-
-        pdf_name = f"nightly_report_{self.end_time.strftime('%Y-%m-%d')}.pdf"
-        cmd = ["typst", "compile", template, pdf_name]
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            print(result.stdout)
-        except subprocess.CalledProcessError as e:
-            print("STDOUT:")
-            print(e.stdout)
-            print("\nSTDERR:")
-            print(e.stderr)
-            return None
-
-        self.RemoveFigureFiles()
-        save_folder = Path(report_dir) / self.end_time.strftime("%Y-%m-%d")
-        save_folder.mkdir(parents=True, exist_ok=True)
-        destination = save_folder / pdf_name
-        shutil.move(pdf_name, str(destination))
-        print(destination)
-        return destination
+        self.SaveManifest(logo=copy_logo(self.figure_dir))
+        date = self.end_time.strftime("%Y-%m-%d")
+        return compile_report("nightly_report.typ", self.figure_dir,
+                              Path(report_dir) / date / f"nightly_report_{date}.pdf")
 
 
 if __name__ == "__main__":
-    from aott.config import DATA_GRABBER_FILE
-
     # Same [output] section of config/data_grabber.toml that AutomaticAnalysis.py reads
-    with open(DATA_GRABBER_FILE, "rb") as _f:
-        _output_config = tomllib.load(_f)["output"]
+    _hdf5_dir, _report_dir = output_dirs()
 
-    report = NightlyReport(_output_config["hdf5_dir"], window_hours=20)
+    report = NightlyReport(_hdf5_dir, window_hours=20)
     print(f"{len(report.observations)} observations, {len(report.skipped)} skipped")
     report.CreateFigures()
-    report.CompileReport(_output_config["report_dir"])
+    report.CompileReport(_report_dir)

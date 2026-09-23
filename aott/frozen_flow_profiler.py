@@ -29,14 +29,15 @@ axes (axis 0, axis 1), not rotated to the sky.
 
     python -m aott.frozen_flow_profiler [file.hdf5] [--signal pol|dm] [--plot [last|all]] ...
 
-Without a file, the newest HDF5 file in the [output] hdf5_dir of
+Without a file, the observation with the latest start time in today's and
+yesterday's UTC date folders of the [output] hdf5_dir of
 config/data_grabber.toml is used.
 """
 import argparse
 import sys
 import warnings
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
@@ -48,11 +49,17 @@ from scipy.optimize import least_squares
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve, lsqr, MatrixRankWarning
 
+from aott.config import AnalysisSettings
+from aott.observation_files import newest_file, output_dirs
 from aott.atmosphere_characterization_tools import (
-    detect_closed_loop_from_dm_commands,
     estimate_r0_L0,
     find_status_runs,
+    r0_at_zenith,
+    read_loop_status,
     reconstruct_pseudo_open_loop,
+    seeing_arcsec,
+    seeing_at_zenith,
+    tau0_at_zenith,
 )
 
 # Voxels of the correlation cube whose fraction of overlapping pupil pairs is
@@ -417,11 +424,22 @@ def closed_loop_batches(is_closed, batch_size, min_length, transition_buffer):
     return batches
 
 
-def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size=5000, max_lag=None,
-                 min_speed=1.0, lag_pitches=2.0, min_run_lags=2, n_layers=6, min_peak=0.0, transition_buffer=10,
-                 low_order_modes=3, n_zernike=50, pupil_radius="auto", max_speed=50.0):
+def _none_if_string(value, word):
+    """None where `value` is the string `word` (any case), else `value` unchanged."""
+    return None if isinstance(value, str) and value.lower() == word else value
+
+
+def profile_file(file_name, signal=None, frame_delay=None, dm_sign=None, batch_size=None, max_lag=None,
+                 min_speed=None, lag_pitches=None, min_run_lags=None, n_layers=None, min_peak=None,
+                 transition_buffer=None, low_order_modes=None, n_zernike=None, pupil_radius=None, max_speed=None):
     """
     Run the profiler on every closed-loop batch of an observation file.
+
+    Every setting not given (None) comes from the [frozen_flow] section of
+    config/analysis.toml, where max_lag = "auto", pupil_radius = "none" and
+    max_speed = "none" stand for the None values described below. The r0 of
+    each batch uses the Zernike count and radial orders of its [atmosphere]
+    section, the same as Atmosphere_Characterization.
 
     `signal` is "dm" (DM commands alone) or "pol" (pseudo-open loop:
     wfs(t + frame_delay) + dm_sign * dm(t); dm_sign = -1 matches an integrator
@@ -449,12 +467,31 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
     Returns a dict with the per-batch results (SI units except r0 in cm and
     tau0 in ms) and the list of FrozenFlowResult.
     """
+    settings = AnalysisSettings(
+        "frozen_flow", signal=signal, frame_delay=frame_delay, dm_sign=dm_sign, batch_size=batch_size,
+        max_lag=max_lag, min_speed=min_speed, lag_pitches=lag_pitches, min_run_lags=min_run_lags,
+        n_layers=n_layers, min_peak=min_peak, transition_buffer=transition_buffer,
+        low_order_modes=low_order_modes, n_zernike=n_zernike, pupil_radius=pupil_radius, max_speed=max_speed)
+    signal, frame_delay, dm_sign = settings["signal"], settings["frame_delay"], settings["dm_sign"]
+    batch_size, min_speed, lag_pitches = settings["batch_size"], settings["min_speed"], settings["lag_pitches"]
+    min_run_lags, n_layers, min_peak = settings["min_run_lags"], settings["n_layers"], settings["min_peak"]
+    transition_buffer, low_order_modes = settings["transition_buffer"], settings["low_order_modes"]
+    n_zernike = settings["n_zernike"]
+    max_lag = _none_if_string(settings["max_lag"], "auto")
+    pupil_radius = _none_if_string(settings["pupil_radius"], "none")
+    max_speed = _none_if_string(settings["max_speed"], "none")
+    r0_settings = AnalysisSettings("atmosphere")
+
     with h5py.File(file_name, "r") as file:
         wfs_grp = file["WFS"]
         if "DM_Map" not in wfs_grp:
             raise ProfilerInputError(f"{file_name}: no WFS/DM_Map, can't place the actuators on a grid")
         if "WFS_Images" not in wfs_grp or "FPS" not in wfs_grp["WFS_Images"].attrs:
             raise ProfilerInputError(f"{file_name}: no WFS/WFS_Images FPS attribute")
+        try:
+            is_closed = read_loop_status(wfs_grp)
+        except KeyError as e:
+            raise ProfilerInputError(f"{file_name}: {e.args[0]}")
         dm_commands = wfs_grp["DM_commands"][:]
         wfs_measurements = wfs_grp["WFS_measurements"][:].squeeze()
         dm_timestamps = wfs_grp["DM_TimeStamps"][:]
@@ -468,6 +505,8 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
         actuators_in_diameter = calibration_grp.attrs.get("Actuators_in_diameter")
         ao_wavelength = calibration_grp.attrs["AO_Calibration_Wavelength"]
         r0_reference_wvl = calibration_grp.attrs["r0_reference_wvl"]
+        # Elevation at the acquisition start [deg], NaN when unknown, for the zenith r0
+        elevation = float(file["Science"].attrs.get("Elevation", np.nan)) if "Science" in file else np.nan
 
     n = dm_map.shape[0]
     if actuators_in_diameter is not None and actuators_in_diameter != n:
@@ -478,7 +517,7 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
         max_lag = lag_for_speed(min_speed, lag_pitches, pitch, fps)
     if pupil_radius == "auto":
         pupil_radius = default_pupil_radius(actuators_in_diameter if actuators_in_diameter is not None else n)
-    z2c = z2c_all[:, :50]
+    z2c = z2c_all[:, :r0_settings["n_zernike"]]
     low_order_z2c = z2c_all[:, :low_order_modes]
     low_pass_z2c = z2c_all[:, :n_zernike]
     if n_zernike > z2c_all.shape[1]:
@@ -487,11 +526,10 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
     slope_map = dm_map if pupil_radius is None else pupil_mask(dm_map, pupil_radius, obstruction_ratio)
     max_step = None if max_speed is None else max_speed / pixel_per_frame_to_mps
 
-    is_closed = detect_closed_loop_from_dm_commands(dm_commands)
-    batches = closed_loop_batches(is_closed, batch_size, min_run_lags * max_lag, transition_buffer)
+    batches =closed_loop_batches(is_closed, batch_size, min_run_lags * max_lag, transition_buffer)
 
     keys = ["Iteration_Times", "Batch_Frames", "Velocity", "Speed", "Direction", "Cn2_Fraction", "N_Layers",
-            "V0", "r0", "tau0"]
+            "V0", "r0", "r0_Zenith", "tau0", "tau0_Zenith", "Seeing", "Seeing_Zenith"]
     results = {k: [] for k in keys}
     fits = []
     for k, (start, end) in enumerate(batches):
@@ -519,7 +557,8 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
 
         dm_zernike = (dm - dm.mean(axis=1, keepdims=True)) @ c2z.T
         try:
-            r0 = estimate_r0_L0(dm_zernike, diameter, max_radial_order=8, min_radial_order=3).r0
+            r0 = estimate_r0_L0(dm_zernike, diameter, max_radial_order=r0_settings["max_radial_order"],
+                                min_radial_order=r0_settings["min_radial_order"]).r0
             r0 *= (r0_reference_wvl / ao_wavelength) ** (6 / 5)
         except (RuntimeError, ValueError):
             r0 = np.nan
@@ -533,7 +572,11 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
         results["N_Layers"].append(len(fit.cn2))
         results["V0"].append(v0)
         results["r0"].append(r0 * 100)
+        results["r0_Zenith"].append(float(r0_at_zenith(r0 * 100, elevation)))
         results["tau0"].append(0.314 * r0 / v0 * 1000 if v0 > 0 else np.nan)
+        results["tau0_Zenith"].append(float(tau0_at_zenith(results["tau0"][-1], elevation)))
+        results["Seeing"].append(float(seeing_arcsec(r0, r0_reference_wvl)))
+        results["Seeing_Zenith"].append(float(seeing_at_zenith(results["Seeing"][-1], elevation)))
 
     for k in keys:
         results[k] = np.array(results[k])
@@ -543,6 +586,8 @@ def profile_file(file_name, signal="dm", frame_delay=2, dm_sign=-1.0, batch_size
                     Low_Order_Modes_Removed=low_order_modes, Zernike_Low_Pass_Modes=n_zernike,
                     Pupil_Radius_Pitch=np.nan if pupil_radius is None else pupil_radius,
                     Max_Speed=np.nan if max_speed is None else max_speed,
+                    N_Zernike_r0=r0_settings["n_zernike"], Min_Radial_Order_r0=r0_settings["min_radial_order"],
+                    Max_Radial_Order_r0=r0_settings["max_radial_order"], Elevation_deg=elevation,
                     Direction_Frame="DM_Map axes (axis 0, axis 1)")
     return dict(results=results, fits=fits, batches=batches, settings=settings)
 
@@ -563,7 +608,8 @@ def save_results(file_name, profile, save_cube=False):
     results = profile["results"]
     fits = profile["fits"]
     units = dict(Iteration_Times="s", Batch_Frames="frames", Velocity="m/s", Speed="m/s", Direction="deg",
-                 V0="m/s", r0="cm", tau0="ms")
+                 V0="m/s", r0="cm", r0_Zenith="cm", tau0="ms", tau0_Zenith="ms", Seeing="arcsec",
+                 Seeing_Zenith="arcsec")
     with h5py.File(file_name, "a") as file:
         analysis_grp = file["WFS"].require_group("Analysis")
         if not fits:
@@ -707,7 +753,7 @@ def plot_layer_profile(cn2, speed, direction, fig_path):
 
 def plot_evolution(results, fig_path):
     """Speed of every layer (marker size ~ C_n^2) and V0, against time."""
-    times = [datetime.fromtimestamp(t) for t in results["Iteration_Times"]]
+    times = [datetime.fromtimestamp(t, timezone.utc) for t in results["Iteration_Times"]]
     speed = results["Speed"]
     cn2 = np.nan_to_num(np.clip(results["Cn2_Fraction"], 0, None))
     scale = 80 / max(cn2.max(), 1e-12)
@@ -716,10 +762,10 @@ def plot_evolution(results, fig_path):
         ax.scatter(times, speed[:, k], s=5 + scale * cn2[:, k], color=f"C{k}", alpha=0.7, label=f"Layer {k + 1}")
     ax.plot(times, results["V0"], "k.-", label="$V_0$")
     ax.set_ylabel("Speed [m/s]")
-    locator = mdates.AutoDateLocator()
+    locator = mdates.AutoDateLocator(tz=timezone.utc)
     ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
-    ax.set_xlabel("Time")
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator, tz=timezone.utc))
+    ax.set_xlabel("Time (UTC)")
     ax.legend(fontsize=8, loc="center left", bbox_to_anchor=(1.01, 0.5))
     fig.tight_layout()
     fig.savefig(fig_path)
@@ -748,71 +794,56 @@ def make_plots(profile, which="last", prefix=_FIGURE_PREFIX):
 # Command line
 # ---------------------------------------------------------------------------
 
-def _latest_file():
-    """Newest file in the [output] hdf5_dir of config/data_grabber.toml, in today's folder if there is one."""
-    from aott.config import DATA_GRABBER_FILE
-    try:
-        import tomllib
-    except ImportError:  # Python < 3.11
-        import tomli as tomllib
-    with open(DATA_GRABBER_FILE, "rb") as f:
-        hdf5_dir = Path(tomllib.load(f)["output"]["hdf5_dir"])
-    folder = hdf5_dir / datetime.now().strftime("%Y-%m-%d")
-    if not folder.is_dir():
-        folder = hdf5_dir
-    return max((f for f in folder.iterdir() if f.is_file()), key=lambda f: f.stat().st_mtime)
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Multi-layer frozen-flow profiler (Berdeu et al.)")
-    parser.add_argument("file", nargs="?", help="observation HDF5 file (default: newest in hdf5_dir)")
-    parser.add_argument("--signal", choices=["pol", "dm"], default="dm",
-                        help="DM commands alone or pseudo-open loop (default: dm)")
-    parser.add_argument("--frame-delay", type=int, default=2, help="loop delay of the pseudo-open loop [frames]")
-    parser.add_argument("--dm-sign", type=float, default=-1.0,
-                        help="sign of the DM commands in the pseudo-open loop (default: -1)")
-    parser.add_argument("--batch-size", type=int, default=5000,
-                        help="maximum frames per batch; shorter closed-loop runs are one batch (default 5000)")
-    parser.add_argument("--max-lag", type=int, default=None,
-                        help="largest time lag fitted [frames] (default: from --min-speed and --lag-pitches)")
-    parser.add_argument("--min-speed", type=float, default=1.0,
-                        help="slowest wind the lag range is sized for [m/s] (default 1)")
-    parser.add_argument("--lag-pitches", type=float, default=2.0,
-                        help="pitches a --min-speed layer moves within the lag range (default 2)")
-    parser.add_argument("--min-run-lags", type=float, default=2.0,
-                        help="skip closed-loop runs shorter than this many max lags (default 2)")
-    parser.add_argument("--n-layers", type=int, default=6, help="maximum number of layers")
-    parser.add_argument("--min-peak", type=float, default=0.0, help="stop adding layers below this C_n^2")
-    parser.add_argument("--low-order-modes", type=int, default=3,
-                        help="leading Z2C modes removed, from tip on (default 3: tip, tilt, defocus)")
-    parser.add_argument("--n-zernike", type=int, default=50,
-                        help="low-pass the signal onto the first N Z2C modes (default 50, 0: no filter)")
-    parser.add_argument("--pupil-radius", default="auto",
+    parser = argparse.ArgumentParser(
+        description="Multi-layer frozen-flow profiler (Berdeu et al.). Every option left out takes its "
+                    "value from the [frozen_flow] section of config/analysis.toml.")
+    parser.add_argument("file", nargs="?",
+                        help="observation HDF5 file (default: the newest one in today's and yesterday's "
+                             "UTC date folders of the [output] hdf5_dir)")
+    parser.add_argument("--signal", choices=["pol", "dm"], help="DM commands alone or pseudo-open loop")
+    parser.add_argument("--frame-delay", type=int, help="loop delay of the pseudo-open loop [frames]")
+    parser.add_argument("--dm-sign", type=float, help="sign of the DM commands in the pseudo-open loop")
+    parser.add_argument("--batch-size", type=int,
+                        help="maximum frames per batch; shorter closed-loop runs are one batch")
+    parser.add_argument("--max-lag", help="largest time lag fitted [frames], or 'auto': from --min-speed "
+                                          "and --lag-pitches")
+    parser.add_argument("--min-speed", type=float, help="slowest wind the lag range is sized for [m/s]")
+    parser.add_argument("--lag-pitches", type=float, help="pitches a --min-speed layer moves within the lag range")
+    parser.add_argument("--min-run-lags", type=float, help="skip closed-loop runs shorter than this many max lags")
+    parser.add_argument("--n-layers", type=int, help="maximum number of layers")
+    parser.add_argument("--min-peak", type=float, help="stop adding layers below this C_n^2")
+    parser.add_argument("--low-order-modes", type=int, help="leading Z2C modes removed, from tip on")
+    parser.add_argument("--n-zernike", type=int, help="low-pass the signal onto the first N Z2C modes (0: no filter)")
+    parser.add_argument("--pupil-radius",
                         help="keep only slopes inside this radius [actuator pitches from the DM_Map centre]; "
-                             "'auto' (default): (Actuators_in_diameter - 1) / 2, 'none': every actuator")
-    parser.add_argument("--max-speed", type=float, default=50.0,
-                        help="bound the tracked peak's move per lag to this speed, per axis [m/s] (default 50)")
-    parser.add_argument("--transition-buffer", type=int, default=10,
-                        help="frames skipped after each open/closed-loop transition")
+                             "'auto': (Actuators_in_diameter - 1) / 2, 'none': every actuator")
+    parser.add_argument("--max-speed",
+                        help="bound the tracked peak's move per lag to this speed, per axis [m/s]; 'none': no bound")
+    parser.add_argument("--transition-buffer", type=int, help="frames skipped after each open/closed-loop transition")
     parser.add_argument("--plot", nargs="?", const="last", choices=["last", "all"],
                         help="save PNGs for the last batch (default) or every batch")
     parser.add_argument("--save-cube", action="store_true", help="also save the correlation cubes")
     args = parser.parse_args()
 
-    file_name = Path(args.file) if args.file else _latest_file()
+    file_name = Path(args.file) if args.file else newest_file(output_dirs()[0])
     print(file_name)
-    pupil_radius = args.pupil_radius.lower()
-    if pupil_radius == "none":
-        pupil_radius = None
-    elif pupil_radius != "auto":
-        pupil_radius = float(pupil_radius)
+    def number_or_word(value, words, kind):
+        # "auto"/"none" pass through to profile_file, anything else is a number
+        if value is None or value.lower() in words:
+            return value
+        return kind(value)
+
     try:
         profile = profile_file(file_name, signal=args.signal, frame_delay=args.frame_delay,
-                               dm_sign=args.dm_sign, batch_size=args.batch_size, max_lag=args.max_lag, min_speed=args.min_speed,
+                               dm_sign=args.dm_sign, batch_size=args.batch_size,
+                               max_lag=number_or_word(args.max_lag, ("auto",), int), min_speed=args.min_speed,
                                lag_pitches=args.lag_pitches, min_run_lags=args.min_run_lags,
                                n_layers=args.n_layers, min_peak=args.min_peak,
                                transition_buffer=args.transition_buffer, low_order_modes=args.low_order_modes,
-                               n_zernike=args.n_zernike, pupil_radius=pupil_radius, max_speed=args.max_speed)
+                               n_zernike=args.n_zernike,
+                               pupil_radius=number_or_word(args.pupil_radius, ("auto", "none"), float),
+                               max_speed=number_or_word(args.max_speed, ("none",), float))
     except ProfilerInputError as e:
         sys.exit(str(e))
     save_results(file_name, profile, save_cube=args.save_cube)
@@ -825,7 +856,7 @@ def main():
         n = results["N_Layers"][k]
         layers = ", ".join(f"{s:.1f} m/s @ {d:.0f} deg ({c:.3f})" for s, d, c in
                            zip(results["Speed"][k][:n], results["Direction"][k][:n], results["Cn2_Fraction"][k][:n]))
-        print(f"{datetime.fromtimestamp(t):%H:%M:%S}  V0 = {results['V0'][k]:.2f} m/s, "
+        print(f"{datetime.fromtimestamp(t, timezone.utc):%H:%M:%S} UTC  V0 = {results['V0'][k]:.2f} m/s, "
               f"tau0 = {results['tau0'][k]:.2f} ms  |  {layers}")
 
     if args.plot:

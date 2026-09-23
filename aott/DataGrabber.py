@@ -1,3 +1,4 @@
+import math
 import sys
 import time
 import threading
@@ -89,15 +90,48 @@ class Recording(NamedTuple):
     stream_timestamps: list
 
 
-def RecordStreams(streams, duration, sem_nb):
+class SampleBuffer:
+    """The samples of one stream, copied into one preallocated array as they
+    arrive, so recording holds the data once in memory. The array grows by half
+    when the capacity is reached."""
+
+    def __init__(self, capacity):
+        self.capacity = max(int(capacity), 1)
+        self.array = None
+        self.n = 0
+
+    def append(self, sample):
+        sample = np.asarray(sample)
+        if self.array is None:
+            self.array = np.empty((self.capacity,) + sample.shape, dtype=sample.dtype)
+        elif self.n == len(self.array):
+            grown = np.empty((len(self.array) * 3 // 2 + 1,) + self.array.shape[1:], dtype=self.array.dtype)
+            grown[:self.n] = self.array
+            self.array = grown
+        self.array[self.n] = sample
+        self.n += 1
+
+    def data(self):
+        """The recorded samples along the first axis, without copying, and without
+        the length-1 axes of a sample (a (1, 1) scalar image gives shape (n,))."""
+        if self.array is None:
+            return np.empty(0)
+        sample_shape = tuple(d for d in self.array.shape[1:] if d != 1)
+        return self.array[:self.n].reshape((self.n,) + sample_shape)
+
+
+def RecordStreams(streams, duration, sem_nb, rate=None):
     """Record `streams` in lockstep for `duration` seconds.
 
     streams[0] sets the pace: each iteration waits for a new frame from it, then
-    reads the current value of the other streams.
+    reads the current value of the other streams. `rate` [Hz], the expected pace,
+    sizes the preallocated buffers (duration * rate, plus 10 %); without it they
+    start small and grow.
     """
 
     pacer = streams[0]
-    samples = [[] for _ in streams]
+    expected = math.ceil(duration * rate * 1.1) + 16 if rate else 1024
+    samples = [SampleBuffer(math.ceil(expected / stream.keep_every)) for stream in streams]
     shm_timestamps = [[] for _ in streams]
     timestamps = []
 
@@ -125,14 +159,15 @@ def RecordStreams(streams, duration, sem_nb):
 
     return Recording(
         np.array(timestamps),
-        [np.array(s).squeeze() for s in samples],
+        [s.data() for s in samples],
         [np.array(t) if stream.record_timestamps else None
          for stream, t in zip(streams, shm_timestamps)],
     )
 
 
-def RecordInParallel(groups, duration, sem_nb):
-    """Run RecordStreams on each group of streams in its own thread.
+def RecordInParallel(groups, duration, sem_nb, rates=None):
+    """Run RecordStreams on each group of streams in its own thread, with
+    `rates[i]` the expected rate of group i (see RecordStreams).
 
     Returns one Recording per group. An error raised in any thread is raised
     here, instead of leaving that group silently empty.
@@ -140,10 +175,11 @@ def RecordInParallel(groups, duration, sem_nb):
 
     recordings = [None] * len(groups)
     errors = []
+    rates = rates or [None] * len(groups)
 
     def Run(i, streams):
         try:
-            recordings[i] = RecordStreams(streams, duration, sem_nb)
+            recordings[i] = RecordStreams(streams, duration, sem_nb, rates[i])
         except Exception as e:
             errors.append(e)
 
