@@ -72,11 +72,12 @@ On a system whose real-time controller exposes its telemetry through dao shared 
 grabs an observation, analyses it and compiles its report:
 
 ```
-python -m aott.observe <target> <duration_s> [--no-simbad]
+python -m aott.observe <target> <duration_s> [--no-simbad] [--controlled-modes N]
 ```
 
 The target name is looked up in SIMBAD for its coordinates, elevation and magnitudes; `--no-simbad`
-skips the lookup. `python -m aott.telemetry` runs the acquisition alone.
+skips the lookup. `--controlled-modes` gives the number of modes the loop corrects (by default, the
+number of columns of the modes-to-commands matrix). `python -m aott.telemetry` runs the acquisition alone.
 
 ## Configuration
 

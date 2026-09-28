@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import h5py
 import numpy as np
+import pytest
 
 from conftest import requires_typst
 from synthetic import write_observation
@@ -139,3 +140,28 @@ def test_acquire_unsliced_background(tmp_path, monkeypatch, output_config):
     assert (dark == 100).all()
     first = frames[0]
     assert any(np.allclose(first, frame[2:30, 4:40]) for frame in psf)
+
+
+def test_acquire_controlled_modes(tmp_path, monkeypatch, output_config):
+    """The number of controlled modes defaults to the columns of M2C, and can be given."""
+    hdf5_dir, report_dir = output_config
+    source = tmp_path / "source.hdf5"
+    write_observation(source)
+    z2c = tmp_path / "z2c.npy"
+    with h5py.File(source, "r") as f:
+        np.save(z2c, f["Calibration/Z2C"][:])
+        n_modes = f["Calibration/M2C"].shape[1]
+
+    monkeypatch.setitem(sys.modules, "dao", fake_dao(source))
+    import aott.telemetry as telemetry
+
+    monkeypatch.setattr(telemetry, "dao", sys.modules["dao"])
+    monkeypatch.setattr(telemetry, "LoadInstrument", lambda: LoadInstrument(CONFIG_DIR / "example_instrument.toml"))
+    monkeypatch.setattr(telemetry, "LoadConfig", lambda: fake_config(z2c, hdf5_dir, report_dir))
+    for given, saved in ((None, n_modes), (100, 100)):
+        path = telemetry.acquire("Test star", 0.2, no_simbad=True, controlled_modes=given)
+        with h5py.File(path, "r") as f:
+            assert f["Calibration"].attrs["Total_Number_Of_Controlled_Modes"] == saved
+        path.unlink()
+    with pytest.raises(SystemExit, match="controlled modes"):
+        telemetry.acquire("Test star", 0.2, no_simbad=True, controlled_modes=n_modes + 1)

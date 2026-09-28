@@ -1,7 +1,7 @@
 """
 Grab one observation, analyse it and compile its report, in one call:
 
-    python -m aott.observe <target> <duration_s> [--no-simbad]
+    python -m aott.observe <target> <duration_s> [--no-simbad] [--controlled-modes N]
 
 The same as python -m aott.telemetry followed by python -m aott.AutomaticAnalysis
 on the file it wrote. Returns when the PDF is written. Observatory machine only
@@ -25,11 +25,13 @@ def main():
     parser.add_argument("duration", type=float, help="acquisition time in seconds")
     parser.add_argument("--no-simbad", action="store_true",
                         help="grab without the SIMBAD query: no magnitudes or coordinates, NaN elevation")
+    parser.add_argument("--controlled-modes", type=int, default=None,
+                        help="number of modes the loop corrects (default: the number of columns of M2C)")
     args = parser.parse_args()
 
     # Checked before the grab, so an incomplete [output] section doesn't waste one
     _, report_dir = output_dirs()
-    hdf5_path = acquire(args.target, args.duration, args.no_simbad)
+    hdf5_path = acquire(args.target, args.duration, args.no_simbad, args.controlled_modes)
     try:
         analyze_and_report(hdf5_path, report_dir)
     except BaseException:
