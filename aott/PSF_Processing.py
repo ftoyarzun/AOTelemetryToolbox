@@ -130,10 +130,10 @@ def filter_dead_pixel_full_img(img):
     img[local_max] = np.median(img)
     return img
 
-def progressive_center_crop(img, final_size, step_sizes=None):
+def progressive_center_crop(img, final_size, step_sizes=None, fill=None):
     """
     Progressively center an image on its CoG, shrinking it to `final_size`.
-    
+
     Parameters
     ----------
     img : 2D array
@@ -141,9 +141,12 @@ def progressive_center_crop(img, final_size, step_sizes=None):
     final_size : int
         Size of the output square image (MxM).
     step_sizes : list of int, optional
-        Sequence of intermediate crop sizes. 
+        Sequence of intermediate crop sizes.
         If None, automatically halves the image until reaching final_size.
-    
+    fill : float, optional
+        Value of the output pixels that fall outside `img`, when the PSF is
+        close to the edge. None uses the median of the part inside `img`.
+
     Returns
     -------
     img_cropped : 2D array
@@ -151,9 +154,10 @@ def progressive_center_crop(img, final_size, step_sizes=None):
     cx, cy : int
         Final CoG coordinates relative to the original image.
     """
-    current_img = img.copy()
-    cx_total, cy_total = None, None
-    
+    current_img = img
+    # Offset of current_img in img
+    cx_total, cy_total = 0, 0
+
     # If step_sizes not provided, generate a decreasing sequence
     if step_sizes is None:
         sz = current_img.shape[0]
@@ -172,46 +176,50 @@ def progressive_center_crop(img, final_size, step_sizes=None):
         x_max = min(cx + half, current_img.shape[1])
         
         current_img = current_img[y_min:y_max, x_min:x_max]
-        
-        # Keep track of CoG relative to original image
-        if cx_total is None:
-            cx_total, cy_total = x_min, y_min
-        else:
-            cx_total += x_min
-            cy_total += y_min
+        cx_total += x_min
+        cy_total += y_min
 
-    # Final crop to exactly final_size if needed
+    # CoG of the last intermediate crop, in the original image
     cx, cy = compute_cog(current_img, integer=True)
+    cx_total += cx
+    cy_total += cy
+
+    # Refine the CoG on a final_size crop of the original image, and crop again around it
     half = final_size // 2
-    y_min = max(cy - half, 0)
-    y_max = min(cy + half, current_img.shape[0])
-    x_min = max(cx - half, 0)
-    x_max = min(cx + half, current_img.shape[1])
-
-    cx_total += x_min + half
-    cy_total += y_min + half
-
-    # Go back to original image and crop one more time
-    y_min = max(cy_total - half, 0)
-    y_max = min(cy_total + half, img.shape[0])
-    x_min = max(cx_total - half, 0)
-    x_max = min(cx_total + half, img.shape[1])
-
-    img_cropped = img[y_min:y_max, x_min:x_max]
+    img_cropped = crop_padded(img, cx_total, cy_total, final_size, fill)
     cx, cy = compute_cog(img_cropped, integer=True)
 
     cx_total += cx - half
     cy_total += cy - half
 
-    y_min = max(cy_total - half, 0)
-    y_max = min(cy_total + half, img.shape[0])
-    x_min = max(cx_total - half, 0)
-    x_max = min(cx_total + half, img.shape[1])
-
-    img_cropped = img[y_min:y_max, x_min:x_max]
+    img_cropped = crop_padded(img, cx_total, cy_total, final_size, fill)
 
     return img_cropped, cx_total, cy_total
-    
+
+
+def crop_padded(img, cx, cy, size, fill=None, frames=slice(None)):
+    """
+    size x size window of the last two axes of `img` (an image, or a stack of
+    frames as a numpy array or an h5py dataset), centred on the pixel (cx, cy).
+    The window always has the full size: its pixels outside `img` are set to
+    `fill`, or with `fill=None` to the median of the part inside `img` (per
+    frame for a stack). `frames` selects the frames of a stack that are read.
+    """
+    half = size // 2
+    height, width = img.shape[-2:]
+    y0, x0 = cy - half, cx - half
+    y_min, x_min = max(y0, 0), max(x0, 0)
+    y_max, x_max = min(y0 + size, height), min(x0 + size, width)
+
+    leading = () if len(img.shape) == 2 else (frames,)
+    inside = np.asarray(img[leading + (slice(y_min, y_max), slice(x_min, x_max))])
+    if fill is None:
+        fill = np.median(inside, axis=(-2, -1), keepdims=True)
+
+    window = np.empty(inside.shape[:-2] + (size, size), dtype=inside.dtype)
+    window[...] = fill
+    window[..., y_min - y0:y_max - y0, x_min - x0:x_max - x0] = inside
+    return window
 
 
 def compute_cog(img, integer=False, low=0.1):
@@ -231,10 +239,10 @@ def compute_cog(img, integer=False, low=0.1):
         cy = int(np.round(cy))
     return cx, cy
 
-def center_cog(img, nx):
-    """Center an image on its CoG"""
+def center_cog(img, nx, fill=None):
+    """Center an image on its CoG, padded with `fill` as in crop_padded"""
     cx,cy = compute_cog(img, integer=True)
-    m_center = img[cy-nx//2:cy+nx//2,cx-nx//2:cx+nx//2]
+    m_center = crop_padded(img, cx, cy, nx, fill)
 
     return m_center, cx, cy
 
@@ -342,7 +350,7 @@ class PSF_Processing:
 
     def ComputeCenterOfGravity(self, display = False):
         
-        self.frames_in = self.science_frames[(slice(None),) + self.CoGWindow()]
+        self.frames_in = self.CoGWindow(self.science_frames)
 
         weighting_map, gain = WCoGCalibration(self.frames_in.mean(axis=0), self.sampling)
         self.xcog, self.ycog = ComputeWCoG(self.frames_in, self.sampling, weighting_map, gain)
@@ -446,7 +454,7 @@ class PSF_Processing:
                 size = min(self.batch_size, run_end - start)
                 self.LoadData(start, size)
                 self.ProcessPSFBatch(is_closed)
-                run_sum = run_sum + self.science_frames[(slice(None),) + self.CoGWindow()].sum(axis=0, dtype=float)
+                run_sum = run_sum + self.CoGWindow(self.science_frames).sum(axis=0, dtype=float)
                 if is_closed:
                     closed_r0.append(self.long_exp_r0)
                     closed_sr_otf.append(self.long_exp_sr_otf)
@@ -487,11 +495,11 @@ class PSF_Processing:
         self.SaveAnalysis()
 
 
-    def CoGWindow(self):
-        """(rows, columns) slices of the science frames the center of gravity is
-        computed in: nx_cog pixels around the first batch's PSF center."""
-        half = self.nx_cog // 2
-        return (slice(max(self.cy - half, 0), self.cy + half), slice(max(self.cx - half, 0), self.cx + half))
+    def CoGWindow(self, frames, index=slice(None)):
+        """The part of the science frames `frames[index]` the center of gravity is
+        computed in: nx_cog pixels around the first batch's PSF center, padded
+        with each frame's median where it extends past the frame."""
+        return crop_padded(frames, self.cx, self.cy, self.nx_cog, frames=index)
 
     def ComputeRunCenterOfGravity(self, batches, mean_frame):
         """
@@ -502,12 +510,11 @@ class PSF_Processing:
         """
         weighting_map, gain = WCoGCalibration(mean_frame, self.sampling)
         run_start, run_end = batches[0][0], batches[-1][1]
-        window = self.CoGWindow()
         with h5py.File(self.file_name, "r") as file:
             frames = file['Science']['Science_PSFs']
             for start, end in batches:
                 self.cogs_x[start:end], self.cogs_y[start:end] = ComputeWCoG(
-                    frames[(slice(start, end),) + window].astype(np.float32), self.sampling, weighting_map, gain)
+                    self.CoGWindow(frames, slice(start, end)).astype(np.float32), self.sampling, weighting_map, gain)
         self.cogs_x[run_start:run_end] -= np.mean(self.cogs_x[run_start:run_end])
         self.cogs_y[run_start:run_end] -= np.mean(self.cogs_y[run_start:run_end])
 
