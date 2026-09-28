@@ -25,7 +25,7 @@ from astropy.time import Time
 from astroquery.simbad import Simbad
 
 from aott.config import LoadInstrument
-from aott.DataGrabber import LoadConfig, Stream, RecordInParallel
+from aott.DataGrabber import LoadConfig, Stream, ReadSample, RecordInParallel
 
 
 # Optional [calibration] keys of the data grabber config, and where they go in the HDF5 file.
@@ -36,7 +36,6 @@ OPTIONAL_ARRAYS = {
     "wfs_reference_frame": "WFS/Reference_Frame",
     "dm_flat": "WFS/DM_flat",
     "dm_offset": "WFS/DM_offset",
-    "science_dark": "Science/Dark",
 }
 
 
@@ -69,12 +68,18 @@ def TargetAltAz(coord, unix_time, site):
     return coord.transform_to(frame)
 
 
-def LoadArray(path, window=None):
-    """Read an array from a .npy file or a dao .im.shm file, optionally cropped to `window`."""
+def LoadArray(path, window=None, sliceable=True):
+    """
+    Read an array from a .npy file or a dao .im.shm file, optionally cropped to `window`.
+    A `sliceable` shm crops it itself, otherwise the whole image is read and cropped here.
+    """
     window = window or {}
     if str(path).endswith(".shm"):
-        return np.asarray(dao.shm(path).get_data(**window)).squeeze()
-    data = np.load(path).squeeze()
+        if sliceable:
+            return np.asarray(dao.shm(path).get_data(**window)).squeeze()
+        data = np.asarray(dao.shm(path).get_data()).squeeze()
+    else:
+        data = np.load(path).squeeze()
     if window:
         data = data[window["y"], window["x"]]
     return data
@@ -99,6 +104,12 @@ def acquire(target, duration, no_simbad=False):
     """
     config = LoadConfig()
     instrument = LoadInstrument()
+
+    background_subtracted = config["acquisition"].get("science_background_subtracted", True)
+    sliceable = config["acquisition"].get("science_shm_sliceable", True)
+    background_path = config["shm"]["science"].get("background", "TODO")
+    if not background_subtracted and background_path == "TODO":
+        sys.exit("science_background_subtracted = false needs the background shm in [shm.science] background")
 
     # Query SIMBAD before grabbing, so a typo in the target name is caught before any data is taken
     star = None
@@ -148,13 +159,24 @@ def acquire(target, duration, no_simbad=False):
     optional = {}
     for key, path in config["calibration"].items():
         if key in OPTIONAL_ARRAYS and path != "TODO":
-            optional[key] = LoadArray(path, psf_window if key == "science_dark" else None)
+            optional[key] = LoadArray(path)
+
+    # Science background, cropped like the frames, read once: it doesn't change during the grab
+    psf_stream = Stream(psf_shm, window=psf_window, sliceable=sliceable)
+    science_dark = None
+    if background_path != "TODO":
+        science_dark = LoadArray(background_path, psf_window, sliceable)
+        frame_shape = np.squeeze(ReadSample(psf_stream)).shape
+        if science_dark.shape != frame_shape:
+            sys.exit(f"shm.science.background: shape {science_dark.shape}, the science frames are {frame_shape}")
+        if not background_subtracted:
+            psf_stream = psf_stream._replace(background=science_dark.astype(np.float32))
 
     wfs_rec, psf_rec = RecordInParallel(
         [
             [Stream(wfs_frames_shm, keep_every=wfs_frame_step), Stream(dm_shm), Stream(wfs_measurements_shm),
              Stream(loop_cmd_shm)],
-            [Stream(psf_shm, window=psf_window)],
+            [psf_stream],
         ],
         duration,
         sem_nb,
@@ -231,6 +253,8 @@ def acquire(target, duration, no_simbad=False):
         dset_science.attrs["Sampling"] = science_camera["sampling_at_calibration"]
         dset_science.attrs["Wavelength"] = science_camera["wvl_nm"] * 1e-9
         dset_science.attrs["Bandpass"] = science_camera["bandpass_nm"] * 1e-9
+        if science_dark is not None:
+            grp_science.create_dataset("Dark", data=science_dark)
 
         grp_calibration = file.create_group("Calibration")
         grp_calibration.create_dataset("M2C", data=m2c)

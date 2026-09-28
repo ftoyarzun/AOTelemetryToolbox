@@ -62,14 +62,35 @@ class Stream(NamedTuple):
 
     keep_every:        keep only every n-th sample. The loop still runs at full rate,
                        so the other streams and the timestamps are not affected.
-    window:            extra get_data arguments, e.g. {"y": slice(0, 100), "x": slice(0, 100)}
+    window:            part of the image to keep, e.g. {"y": slice(0, 100), "x": slice(0, 100)}
+    sliceable:         the shm crops to `window` itself (get_data(y=..., x=...)), which is
+                       faster; otherwise the whole image is read and indexed here
+    background:        array subtracted from every kept sample (already cropped to
+                       `window`), which is then stored as float32
     record_timestamps: also record shm.get_timestamp() for every kept sample, as Unix time
     """
 
     shm: object
     keep_every: int = 1
     window: Optional[dict] = None
+    sliceable: bool = True
+    background: Optional[np.ndarray] = None
     record_timestamps: bool = False
+
+
+def ReadSample(stream, **kwargs):
+    """One sample of `stream`: get_data(**kwargs), cropped to its window and
+    background subtracted."""
+    window = stream.window or {}
+    if stream.sliceable:
+        sample = stream.shm.get_data(**kwargs, **window)
+    else:
+        sample = stream.shm.get_data(**kwargs)
+        if window:
+            sample = np.asarray(sample)[window["y"], window["x"]]
+    if stream.background is not None:
+        sample = np.subtract(sample, stream.background, dtype=np.float32)
+    return sample
 
 
 class Recording(NamedTuple):
@@ -138,7 +159,7 @@ def RecordStreams(streams, duration, sem_nb, rate=None):
     start_time = time.monotonic()
     n = 0
     while time.monotonic() - start_time < duration:
-        frame = pacer.shm.get_data(check=True, semNb=sem_nb, **(pacer.window or {}))
+        frame = ReadSample(pacer, check=True, semNb=sem_nb)
         timestamps.append(time.time())
 
         for k, stream in enumerate(streams):
@@ -147,9 +168,7 @@ def RecordStreams(streams, duration, sem_nb, rate=None):
             if k == 0:
                 samples[k].append(frame)
             else:
-                samples[k].append(
-                    stream.shm.get_data(semNb=sem_nb, **(stream.window or {}))
-                )
+                samples[k].append(ReadSample(stream, semNb=sem_nb))
             if stream.record_timestamps:
                 shm_timestamps[k].append(stream.shm.get_timestamp().timestamp())
         n += 1

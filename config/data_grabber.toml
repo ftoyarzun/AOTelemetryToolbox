@@ -45,12 +45,22 @@ dit = "TODO"
 fps = "TODO"
 # science camera gain
 gain = "TODO"
+# science camera background (dark), full frame, read once and cropped with
+# [acquisition.science_crop] like the frames, saved as Science/Dark.
+# Required when science_background_subtracted = false, optional otherwise.
+# background = "TODO"
 
 [acquisition]
 # dao semaphore number the readers wait on
 semaphore = "TODO"
 # keep one wavefront sensor frame out of this many (1 keeps all of them)
 wfs_frame_step = 1
+# true if the science frames in the shm are already background subtracted. If false,
+# [shm.science] background is subtracted from every frame, stored as float32.
+science_background_subtracted = true
+# true if the science shms can crop to [acquisition.science_crop] themselves
+# (get_data(y=..., x=...)), which is faster. If false, the whole frame is read and cropped.
+science_shm_sliceable = true
 
 # Optional window of the science frame to read, in pixels as [start, stop].
 # Leave both lines out to read the whole frame.
@@ -73,9 +83,6 @@ Z2C = "TODO"
 # DM flat and offset commands, saved as WFS/DM_flat and WFS/DM_offset
 # dm_flat = "TODO"
 # dm_offset = "TODO"
-# science camera dark, saved as Science/Dark. Give the full frame: it is cropped
-# with [acquisition.science_crop] like the science frames.
-# science_dark = "TODO"
 
 [output]
 # folder for the observation HDF5 files, a subfolder per UTC date is created inside
