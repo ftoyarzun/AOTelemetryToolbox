@@ -336,7 +336,7 @@ class PSF_Processing:
             self.sampling = self.sampling_calib / self.SkyCalibPupilRatio * self.wvl_sky/self.wvl_calib
             self.wvl = self.wvl_sky
 
-            self.nx = min(int(science_frames_dset.shape[-1]*0.8)//2*2, int((3 * self.instrument.nact * self.sampling) // 2) * 2)
+            self.nx = min(int(science_frames_dset.shape[-1]*0.8)//2*2, int((3 * self.actuators_in_dm_diameter * self.sampling) // 2) * 2)
             self.nx_cog = self.nx // 2
             self.cx = None
             self.cy = None
