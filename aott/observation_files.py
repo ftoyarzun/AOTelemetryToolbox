@@ -36,20 +36,41 @@ def utc_date(timestamp):
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d")
 
 
+def science_camera_group(file):
+    """
+    The group of the analysed science camera in an open observation file, which holds
+    its Science_PSFs, PSF_TimeStamps and Dark: Science/<Science.attrs["Analysed_Camera"]>,
+    or Science itself in older files, which have one camera and keep its frames there.
+    None if the file has no Science group.
+    """
+    if "Science" not in file:
+        return None
+    science = file["Science"]
+    if "Analysed_Camera" not in science.attrs:
+        return science
+    camera = str(science.attrs["Analysed_Camera"])
+    if camera not in science:
+        raise KeyError(f"Science.attrs['Analysed_Camera'] is '{camera}', but Science has no such group")
+    return science[camera]
+
+
 def observation_span(file):
     """
     (start, end) Unix timestamps of an open observation file: the first and
-    last WFS/DM_TimeStamps sample, falling back to Science's PSF_TimeStamps
-    dataset, or attr in older files. Only two samples are read, so this stays
-    cheap however long the observation is. None if the file has no timestamps.
+    last WFS/DM_TimeStamps sample, falling back to the science camera's
+    PSF_TimeStamps dataset, or attr in older files. Only two samples are read,
+    so this stays cheap however long the observation is. None if the file has
+    no timestamps.
     """
-    for path in ("WFS/DM_TimeStamps", "Science/PSF_TimeStamps"):
-        if path in file:
-            ts = file[path]
-            if ts.shape[0] > 0:
-                return float(ts[0]), float(ts[-1])
-    if "Science" in file and "PSF_TimeStamps" in file["Science"].attrs:
-        ts = np.asarray(file["Science"].attrs["PSF_TimeStamps"], dtype=float)
+    if "WFS/DM_TimeStamps" in file and file["WFS/DM_TimeStamps"].shape[0] > 0:
+        ts = file["WFS/DM_TimeStamps"]
+        return float(ts[0]), float(ts[-1])
+    camera = science_camera_group(file)
+    if camera is not None and "PSF_TimeStamps" in camera and camera["PSF_TimeStamps"].shape[0] > 0:
+        ts = camera["PSF_TimeStamps"]
+        return float(ts[0]), float(ts[-1])
+    if camera is not None and "PSF_TimeStamps" in camera.attrs:
+        ts = np.asarray(camera.attrs["PSF_TimeStamps"], dtype=float)
         if ts.size > 0:
             return float(ts[0]), float(ts[-1])
     return None

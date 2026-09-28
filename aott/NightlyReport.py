@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aott.AnalysisViewer import _format_time_axis, utc_datetimes
-from aott.observation_files import date_folders, hdf5_files, observation_span, output_dirs, telescope_name
+from aott.observation_files import (date_folders, hdf5_files, observation_span, output_dirs, science_camera_group,
+                                    telescope_name)
 from aott.report import compile_report, copy_logo, new_run_dir
 
 
@@ -129,8 +130,9 @@ class NightlyReport:
             mags[band] = float(sci_attrs[f"{band}mag"]) if f"{band}mag" in sci_attrs else None
 
         wavelength = None
-        if "Science/Science_PSFs" in file and "Wavelength" in file["Science/Science_PSFs"].attrs:
-            wavelength = float(file["Science/Science_PSFs"].attrs["Wavelength"])
+        camera = science_camera_group(file)
+        if camera is not None and "Science_PSFs" in camera and "Wavelength" in camera["Science_PSFs"].attrs:
+            wavelength = float(camera["Science_PSFs"].attrs["Wavelength"])
         r0_reference_wvl = None
         if "Calibration" in file and "r0_reference_wvl" in file["Calibration"].attrs:
             r0_reference_wvl = float(file["Calibration"].attrs["r0_reference_wvl"])

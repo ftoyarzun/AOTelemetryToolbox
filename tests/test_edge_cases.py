@@ -76,7 +76,7 @@ def test_nan_science_frame(tmp_path):
     path = tmp_path / "nan_frame.hdf5"
     write_observation(path, duration=1.5)
     with h5py.File(path, "a") as f:
-        f["Science/Science_PSFs"][5] = np.nan
+        f["Science/camera/Science_PSFs"][5] = np.nan
     psf = PSF_Processing(path)
     psf.SetPSFModel()
     psf.AnalyzeAllTheFile()
@@ -88,7 +88,29 @@ def test_science_camera_rate_from_its_timestamps(tmp_path):
     path = tmp_path / "wrong_fps.hdf5"
     truth = write_observation(path, duration=1.5)
     with h5py.File(path, "a") as f:
-        f["Science/Science_PSFs"].attrs["FPS"] = 1000
+        f["Science/camera/Science_PSFs"].attrs["FPS"] = 1000
     psf = PSF_Processing(path)
     assert psf.fps == pytest.approx(truth["science_fps"])
     assert psf.batch_size == round(psf.batch_duration * truth["science_fps"])
+
+
+def test_older_flat_science_layout(tmp_path):
+    """Files written before the per-camera groups keep the frames directly in Science."""
+    path = tmp_path / "flat.hdf5"
+    truth = write_observation(path, duration=1.5, camera=None)
+    psf = PSF_Processing(path)
+    assert psf.fps == pytest.approx(truth["science_fps"])
+    psf.SetPSFModel()
+    psf.AnalyzeAllTheFile()
+    with h5py.File(path, "r") as f:
+        assert f["Science/Analysis/Long_Exposure/r0"].shape[0] > 0
+        assert "Camera" not in f["Science/Analysis"].attrs
+
+
+def test_analysed_camera_group_missing(tmp_path):
+    path = tmp_path / "missing_camera.hdf5"
+    write_observation(path, duration=1.5)
+    with h5py.File(path, "a") as f:
+        f["Science"].attrs["Analysed_Camera"] = "other"
+    with pytest.raises(KeyError, match="other"):
+        PSF_Processing(path)

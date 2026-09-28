@@ -1,37 +1,8 @@
 # Data grabber configuration for local runs on Windows, against the repo's own
 # data/ folder. simulation/DataGeneration.ipynb writes to its [output] hdf5_dir;
 # copy these values into data_grabber.toml to use them elsewhere. Only [output]
-# is filled in: the other sections are only needed to grab telemetry with
-# aott/telemetry.py on the observatory machine.
-
-[shm.wfs]
-frames = "TODO"
-valid_pixel_map = "TODO"
-measurements = "TODO"
-fps = "TODO"
-gain = "TODO"
-
-[shm.dm]
-commands = "TODO"
-m2c = "TODO"
-
-[shm.loop]
-cmd = "TODO"
-gain = "TODO"
-leak = "TODO"
-
-[shm.science]
-frames = "TODO"
-dit = "TODO"
-fps = "TODO"
-gain = "TODO"
-
-[acquisition]
-semaphore = "TODO"
-wfs_frame_step = 1
-
-[calibration]
-Z2C = "TODO"
+# is filled in: the threads and static entries are only needed to grab telemetry
+# with aott/telemetry.py on the observatory machine (see data_grabber.toml).
 
 [output]
 # Relative to the repo root (AutomaticAnalysis.py is run from there). A

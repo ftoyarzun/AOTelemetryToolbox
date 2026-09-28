@@ -223,6 +223,7 @@ papers/
 data/
 plans/
 class reports/
+ReferenceScripts/
 
 # Claude
 .claude

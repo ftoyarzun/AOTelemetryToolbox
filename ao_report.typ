@@ -16,6 +16,7 @@
 #let JMag         = sys.inputs.at("JMag", default: "none")
 #let HMag         = sys.inputs.at("HMag", default: "none")
 #let logo         = sys.inputs.at("logo", default: "none")
+#let saturation   = sys.inputs.at("saturation", default: "none")
 
 // report_data.json is written by AnalysisViewer.SaveFigureManifest --
 // "figures" says which PNGs actually got produced for this observation
@@ -168,6 +169,15 @@
   [*Telescope*], [#telescope], [*Target*], [#breakable(target)],
   [*Date (UTC)*], [#date.trim("/")], [*Elevation*], [#elevation°],
 )
+
+#if saturation != "none" [
+  #v(8pt)
+  #grid(
+    columns: (auto, 1fr),
+    column-gutter: 10pt,
+    [*Science frames*], [#saturation.split("; ").join(linebreak())],
+  )
+]
 
 #v(10pt)
 #table(

@@ -86,7 +86,7 @@ location:
 
 | File                  | Contents |
 |-----------------------|----------|
-| `data_grabber.toml`   | This machine: the dao shared memories to read, the calibration files, the output folders, and optionally the CPU cores to run on. |
+| `data_grabber.toml`   | This machine: the acquisition threads and the dao shared memories each one records, the ones read once (including calibration files), where each goes in the HDF5 file, which science camera the analysis uses, the output folders, and optionally the CPU cores to run on. |
 | `instrument.toml`     | The instrument: observatory position, pupil diameter and central obstruction, DM geometry, WFS and science camera wavelengths and sampling. |
 | `analysis.toml`       | Analysis settings: batch lengths, number of Zernike modes, radial orders used in the fits, PSD settings, and the frozen-flow profiler options. Ships with working defaults. |
 

@@ -2,8 +2,8 @@
 Where the project's config files are, and how to read the instrument and analysis ones.
 There is exactly one of each, all in the config/ folder at the repo root:
 
-    config/data_grabber.toml   this machine: shared memories, calibration files, output folders
-    config/instrument.toml     the instrument: site, pupil, DM, WFS, science camera
+    config/data_grabber.toml   this machine: the threads and shared memories to record, output folders
+    config/instrument.toml     the instrument: site, pupil, DM, WFS, science cameras
     config/analysis.toml       the analysis: batch lengths, transition buffers, fit settings
 
 Their paths come from the package location, so they don't depend on the folder the scripts
@@ -60,9 +60,14 @@ def LoadInstrument(path=INSTRUMENT_FILE):
     with open(path, "rb") as f:
         instrument = tomllib.load(f)
 
-    missing = [f"{section}.{key}"
-               for section, values in instrument.items()
-               for key, value in values.items() if value == "TODO"]
+    def Todo(table, prefix):
+        for key, value in table.items():
+            if isinstance(value, dict):
+                yield from Todo(value, f"{prefix}{key}.")
+            elif value == "TODO":
+                yield f"{prefix}{key}"
+
+    missing = list(Todo(instrument, ""))
     if missing:
         sys.exit(f"{path}: fill in these values first: " + ", ".join(missing))
 
