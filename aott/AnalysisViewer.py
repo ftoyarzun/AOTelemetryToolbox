@@ -57,8 +57,9 @@ def utc_datetimes(timestamps):
 
 
 def _format_time_axis(ax):
-    """Label a datetime x-axis as HH:MM:SS UTC, whatever the tick spacing."""
-    locator = mdates.AutoDateLocator(tz=timezone.utc)
+    """Label a datetime x-axis as HH:MM:SS UTC, whatever the tick spacing, with at most five
+    labels, rotated so they don't overlap."""
+    locator = mdates.AutoDateLocator(tz=timezone.utc, minticks=3, maxticks=5)
     formatter = mdates.AutoDateFormatter(locator, tz=timezone.utc)
     for scale in (1 / mdates.HOURS_PER_DAY, 1 / mdates.MINUTES_PER_DAY, 1 / mdates.SEC_PER_DAY):
         formatter.scaled[scale] = "%H:%M:%S"
@@ -67,6 +68,7 @@ def _format_time_axis(ax):
         lambda x, pos=None: mdates.num2date(x, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-5])
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right", rotation_mode="anchor")
     ax.set_xlabel("Time (UTC)")
 
 

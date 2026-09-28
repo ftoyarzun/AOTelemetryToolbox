@@ -9,6 +9,11 @@ on the file it wrote. Returns when the PDF is written. Observatory machine only
 """
 import argparse
 
+from aott.config import PinToCPUs
+
+# Before the other imports, so numpy's BLAS threads are pinned too
+PinToCPUs()
+
 from aott.AutomaticAnalysis import analyze_and_report
 from aott.observation_files import output_dirs
 from aott.telemetry import acquire

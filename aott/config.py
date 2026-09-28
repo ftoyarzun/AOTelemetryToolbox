@@ -9,6 +9,7 @@ There is exactly one of each, all in the config/ folder at the repo root:
 Their paths come from the package location, so they don't depend on the folder the scripts
 are run from. The other files in config/ are filled-in reference copies that no code reads.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,26 @@ def AnalysisSettings(section, **given):
         settings = tomllib.load(f)[section]
     settings.update({key: value for key, value in given.items() if value is not None})
     return settings
+
+
+def PinToCPUs(path=DATA_GRABBER_FILE):
+    """Restrict this process to the [acquisition] cpus of the data grabber config, if given.
+
+    Only threads started afterwards inherit the affinity, and the BLAS libraries start
+    their thread pools (and read the *_NUM_THREADS variables) when numpy is imported,
+    so call this before importing numpy or any aott module other than this one.
+    Child processes (the typst compile) inherit it too. No-op without the setting,
+    or where sched_setaffinity doesn't exist (Windows).
+    """
+
+    with open(path, "rb") as f:
+        cpus = tomllib.load(f).get("acquisition", {}).get("cpus")
+    if not cpus or not hasattr(os, "sched_setaffinity"):
+        return
+
+    os.sched_setaffinity(0, cpus)
+    for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(variable, str(len(cpus)))
 
 
 def LoadInstrument(path=INSTRUMENT_FILE):

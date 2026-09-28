@@ -61,6 +61,9 @@ science_background_subtracted = true
 # true if the science shms can crop to [acquisition.science_crop] themselves
 # (get_data(y=..., x=...)), which is faster. If false, the whole frame is read and cropped.
 science_shm_sliceable = true
+# Optional: CPU cores python -m aott.observe runs on (grab, analysis and report), like
+# taskset -c. Linux only, ignored elsewhere. Leave it out to use every core.
+# cpus = [2, 3, 4, 5]
 
 # Optional window of the science frame to read, in pixels as [start, stop].
 # Leave both lines out to read the whole frame.
