@@ -86,9 +86,9 @@ def LoadArray(path, window=None, sliceable=True):
 
 
 def ActuatorsFirst(matrix, n_act, name):
-    """`matrix` as (n_act, n), transposed if it came as (n, n_act). Exits if the orientation is ambiguous."""
+    """`matrix` as (n_act, n), transposed if it came as (n, n_act). If ambiguous, assumed correct"""
     matrix = np.asarray(matrix).squeeze()
-    if matrix.ndim == 2 and matrix.shape[0] != matrix.shape[1]:
+    if matrix.ndim == 2:# and matrix.shape[0] != matrix.shape[1]:
         if matrix.shape[0] == n_act:
             return matrix
         if matrix.shape[1] == n_act:
