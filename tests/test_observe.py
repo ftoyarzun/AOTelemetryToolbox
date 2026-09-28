@@ -278,3 +278,17 @@ def test_config_problems(grabber):
 def test_reference_configs_are_complete(name):
     with open(CONFIG_DIR / name, "rb") as f:
         assert ConfigProblems(tomllib.load(f)) == []
+
+
+def test_acquire_controlled_modes(grabber):
+    """The number of controlled modes defaults to the columns of M2C, and can be given."""
+    with h5py.File(grabber.source, "r") as f:
+        n_modes = f["Calibration/M2C"].shape[1]
+    telemetry, _ = grabber()
+    for given, saved in ((None, n_modes), (100, 100)):
+        path = telemetry.acquire("Test star", 0.2, no_simbad=True, controlled_modes=given)
+        with h5py.File(path, "r") as f:
+            assert f["Calibration"].attrs["Total_Number_Of_Controlled_Modes"] == saved
+        path.unlink()
+    with pytest.raises(SystemExit, match="controlled modes"):
+        telemetry.acquire("Test star", 0.2, no_simbad=True, controlled_modes=n_modes + 1)

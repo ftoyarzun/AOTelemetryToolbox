@@ -2,7 +2,7 @@
 Grab AO telemetry and science frames from the dao shared memories and write one
 observation HDF5 file, with the same layout as simulation/DataGeneration.ipynb:
 
-    python -m aott.telemetry <target> <duration_s> [--no-simbad]
+    python -m aott.telemetry <target> <duration_s> [--no-simbad] [--controlled-modes N]
 
 The threads, the shared memories each one records and the ones read once, and where
 each of them goes in the file, come from config/data_grabber.toml; the instrument
@@ -117,11 +117,14 @@ def WriteAttr(file, destination, value):
     target.attrs[name] = value
 
 
-def acquire(target, duration, no_simbad=False):
+def acquire(target, duration, no_simbad=False, controlled_modes=None):
     """
     Grab `duration` seconds of every thread of the data grabber config for `target`,
     write the observation HDF5 file and return its path. Exits before grabbing if the
     config is incomplete or, unless `no_simbad`, SIMBAD doesn't know the target.
+    `controlled_modes` is the number of modes the loop corrects, saved as
+    Calibration.attrs["Total_Number_Of_Controlled_Modes"]; by default, the
+    number of columns of M2C.
     """
     config = LoadConfig()
     instrument = LoadInstrument()
@@ -186,6 +189,13 @@ def acquire(target, duration, no_simbad=False):
                     sys.exit(f"static.{stream_config['background']}: shape {background.shape}, "
                              f"the frames of threads.{thread_name} are {frame_shape}")
                 streams[k] = streams[k]._replace(background=background)
+
+    n_modes = next(static[name].shape[1] for name, entry in statics.items()
+                   if "Calibration/M2C" in AsList(entry.get("dataset", [])))
+    if controlled_modes is None:
+        controlled_modes = n_modes
+    elif not 1 <= controlled_modes <= n_modes:
+        sys.exit(f"{controlled_modes} controlled modes: M2C has {n_modes} modes")
 
     recordings = RecordInParallel({name: tuple(thread) for name, thread in threads.items()}, duration)
 
@@ -279,7 +289,7 @@ def acquire(target, duration, no_simbad=False):
         grp_calibration.attrs["SkyCalibPupilRatio"] = instrument["dm"]["sky_calib_pupil_ratio"]
         grp_calibration.attrs["Actuators_in_diameter"] = instrument["dm"]["actuators_in_diameter"]
         grp_calibration.attrs["Total_Number_Of_Actuators"] = instrument["dm"]["n_actuators"]
-        grp_calibration.attrs["Total_Number_Of_Controlled_Modes"] = file["Calibration/M2C"].shape[1]
+        grp_calibration.attrs["Total_Number_Of_Controlled_Modes"] = controlled_modes
         grp_calibration.attrs["r0_reference_wvl"] = instrument["conventions"]["r0_reference_wvl_nm"] * 1e-9
         if "Interaction_Matrix" in grp_calibration:
             grp_calibration["Interaction_Matrix"].attrs["Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
@@ -294,8 +304,10 @@ def main():
     parser.add_argument("duration", type=float, help="acquisition time in seconds")
     parser.add_argument("--no-simbad", action="store_true",
                         help="grab without the SIMBAD query: no magnitudes or coordinates, NaN elevation")
+    parser.add_argument("--controlled-modes", type=int, default=None,
+                        help="number of modes the loop corrects (default: the number of columns of M2C)")
     args = parser.parse_args()
-    acquire(args.target, args.duration, args.no_simbad)
+    acquire(args.target, args.duration, args.no_simbad, args.controlled_modes)
 
 
 if __name__ == "__main__":
