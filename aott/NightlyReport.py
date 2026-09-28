@@ -11,6 +11,7 @@ from pathlib import Path
 from aott.AnalysisViewer import _format_time_axis, utc_datetimes
 from aott.observation_files import (date_folders, hdf5_files, observation_span, output_dirs, science_camera_group,
                                     telescope_name)
+from aott.config import Progress
 from aott.report import compile_report, copy_logo, new_run_dir
 
 
@@ -103,21 +104,33 @@ class NightlyReport:
 
     def _collect_observations(self):
         start, end = self.start_time.timestamp(), self.end_time.timestamp()
-        for path in self._candidate_files():
+        Progress(f"Window: {self.start_time:%Y-%m-%d %H:%M} to {self.end_time:%Y-%m-%d %H:%M} UTC "
+                 f"({self.window_hours:g} h)")
+        paths = list(self._candidate_files())
+        Progress(f"{len(paths)} HDF5 files found under {self.hdf5_dir}")
+        for k, path in enumerate(paths):
+            prefix = f"  [{k + 1}/{len(paths)}] {path.name}:"
             try:
                 with h5py.File(path, "r") as file:
                     obs_time = _observation_time(file)
                     if obs_time is None:
                         self.skipped.append((path.name, "no timestamps"))
+                        print(f"{prefix} left out, no timestamps", flush=True)
                         continue
                     if not start <= obs_time <= end:
+                        print(f"{prefix} outside the window", flush=True)
                         continue
                     if "WFS/Analysis" not in file and "Science/Analysis" not in file:
                         self.skipped.append((path.name, "no analysis results"))
+                        print(f"{prefix} left out, no analysis results", flush=True)
                         continue
-                    self.observations.append(self._load_observation(file, path, obs_time))
+                    observation = self._load_observation(file, path, obs_time)
+                    self.observations.append(observation)
+                    print(f"{prefix} {observation['target']}, {len(observation['stats'])} quantities", flush=True)
             except OSError as e:
                 self.skipped.append((path.name, f"could not be opened ({e})"))
+                print(f"{prefix} left out, could not be opened ({e})", flush=True)
+        Progress(f"{len(self.observations)} observations in the window, {len(self.skipped)} left out")
         self.observations.sort(key=lambda o: o["time"])
         if self.telescope is None:
             names = sorted({o["telescope"] for o in self.observations if o["telescope"]})
@@ -203,6 +216,7 @@ class NightlyReport:
         plotted = [self._plot_quantity(ax, *s) for s in series]
         if not any(plotted):
             plt.close(fig)
+            Progress(f"Plot {figure_key}: no data, skipped")
             return
 
         if log_ratio is not None:
@@ -223,6 +237,7 @@ class NightlyReport:
         fig.savefig(self.figure_dir / _FIGURE_FILES[figure_key], bbox_inches="tight")
         plt.close(fig)
         self.figures[figure_key] = True
+        Progress(f"Plot {figure_key}: {sum(plotted)} of {len(series)} series")
 
     def _common_wavelength(self, field, keys):
         """' @ N nm' for an axis label if every observation with one of the
@@ -280,6 +295,7 @@ class NightlyReport:
     def CreateFigures(self):
         # MakeL0Plot is left out: the L0 estimator is not validated
         # (Validated=False attr)
+        Progress("Plotting the nightly figures")
         self.MakeR0Plot()
         self.MakeTau0Plot()
         self.MakeV0Plot()
@@ -335,8 +351,10 @@ class NightlyReport:
         move the PDF to report_dir/<date>/ (see aott.report.compile_report).
         Returns the PDF path, or None if the compile failed.
         """
+        Progress("Writing nightly_report_data.json (per-target tables)")
         self.SaveManifest(logo=copy_logo(self.figure_dir))
         date = self.end_time.strftime("%Y-%m-%d")
+        Progress("Compiling the nightly report with typst")
         return compile_report("nightly_report.typ", self.figure_dir,
                               Path(report_dir) / date / f"nightly_report_{date}.pdf")
 
@@ -345,7 +363,7 @@ if __name__ == "__main__":
     # Same [output] section of config/data_grabber.toml that AutomaticAnalysis.py reads
     _hdf5_dir, _report_dir = output_dirs()
 
+    Progress("Nightly report")
     report = NightlyReport(_hdf5_dir, window_hours=20)
-    print(f"{len(report.observations)} observations, {len(report.skipped)} skipped")
     report.CreateFigures()
     report.CompileReport(_report_dir)
