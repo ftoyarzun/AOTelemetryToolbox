@@ -360,6 +360,8 @@ class NightlyReport:
 
 
 if __name__ == "__main__":
+    # Figures are only saved: no GUI window, which is slow over a forwarded display
+    plt.switch_backend("Agg")
     # Same [output] section of config/data_grabber.toml that AutomaticAnalysis.py reads
     _hdf5_dir, _report_dir = output_dirs()
 

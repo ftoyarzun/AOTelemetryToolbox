@@ -17,6 +17,7 @@ from aott.report import compile_report, copy_logo, new_run_dir
 from pathlib import Path
 import argparse
 import h5py
+import matplotlib
 
 from datetime import datetime, timezone
 
@@ -106,6 +107,8 @@ def main():
                         help="observation HDF5 file (default: the newest one not yet analysed, in today's "
                              "and yesterday's UTC date folders of the [output] hdf5_dir)")
     args = parser.parse_args()
+    # Figures are only saved: no GUI window, which is slow over a forwarded display
+    matplotlib.use("Agg")
 
     # hdf5_dir and report_dir come from the [output] section of
     # config/data_grabber.toml, so this script and aott/telemetry.py agree on them.

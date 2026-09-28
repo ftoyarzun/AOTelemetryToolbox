@@ -14,6 +14,7 @@ from aott.config import PinToCPUs
 # Before the other imports, so numpy's BLAS threads are pinned too
 PinToCPUs()
 
+import matplotlib
 from aott.AutomaticAnalysis import analyze_and_report
 from aott.observation_files import output_dirs
 from aott.telemetry import acquire
@@ -28,6 +29,8 @@ def main():
     parser.add_argument("--controlled-modes", type=int, default=None,
                         help="number of modes the loop corrects (default: the number of columns of M2C)")
     args = parser.parse_args()
+    # Figures are only saved: no GUI window, which is slow over a forwarded display
+    matplotlib.use("Agg")
 
     # Checked before the grab, so an incomplete [output] section doesn't waste one
     _, report_dir = output_dirs()
