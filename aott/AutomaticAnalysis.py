@@ -10,6 +10,7 @@ observation and calls analyze_and_report on it.
 from aott.PSF_Processing import PSF_Processing
 from aott.Atmosphere_Characterization import Atmosphere_Characterization
 from aott.AnalysisViewer import AnalysisViewer
+from aott.config import Progress
 from aott.frozen_flow_profiler import ProfilerInputError, profile_file, save_results
 from aott.observation_files import newest_file, observation_span, output_dirs, telescope_name, utc_date
 from aott.report import compile_report, copy_logo, new_run_dir
@@ -42,6 +43,7 @@ def analyze_and_report(file_name, report_dir):
     PDF path, or None if the compile failed.
     """
     file_name = Path(file_name)
+    Progress(f"Analysing {file_name}")
 
     # UTC date of the observation start, like the hdf5_dir/<date> folder telemetry.py writes it to
     with h5py.File(file_name, "r") as file:
@@ -50,14 +52,17 @@ def analyze_and_report(file_name, report_dir):
         saturation = saturation_summary(file)
     date = utc_date(span[0]) if span is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    Progress("Step 1/5: PSF analysis (science camera)")
     psf = PSF_Processing(file_name)
     psf.SetPSFModel()
     psf.AnalyzeAllTheFile()
 
+    Progress("Step 2/5: atmosphere characterization (WFS/DM telemetry)")
     atm_char = Atmosphere_Characterization(file_name)
     atm_char.AnalyzeAllTheFile()
 
     # Frozen-flow profiler, closed-loop runs only
+    Progress("Step 3/5: frozen-flow profiler")
     try:
         save_results(file_name, profile_file(file_name))
     except ProfilerInputError as e:
@@ -65,6 +70,7 @@ def analyze_and_report(file_name, report_dir):
 
     # PNGs and report_data.json go to a temporary folder of this run's own,
     # where compile_report also compiles the template
+    Progress("Step 4/5: plotting the figures")
     run_dir = new_run_dir("ao_report_")
     av = AnalysisViewer(file_name, figure_dir=run_dir)
     av.CreateAtmosphericAnalysisFigures()
@@ -89,6 +95,7 @@ def analyze_and_report(file_name, report_dir):
     else:
         inputs.update(VMag="none", RMag="none", JMag="none", HMag="none")
 
+    Progress("Step 5/5: compiling the report with typst")
     return compile_report("ao_report.typ", run_dir,
                           Path(report_dir) / date / f"ao_report{file_name.stem}.pdf", inputs)
 

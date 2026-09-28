@@ -11,7 +11,7 @@ try:
 except ImportError:  # Python < 3.11
     import tomli as tomllib
 
-from aott.config import DATA_GRABBER_FILE
+from aott.config import DATA_GRABBER_FILE, Progress
 
 # The HDF5 destinations the analysis reads, "path" for a dataset and "path@Name" for an
 # attribute. {camera} is the [acquisition] analysed_camera.
@@ -337,10 +337,15 @@ def RecordInParallel(threads, duration):
         threading.Thread(target=Run, args=(name, *thread), daemon=True)
         for name, thread in threads.items()
     ]
+    start_time = time.monotonic()
     for worker in workers:
         worker.start()
+    # Elapsed time every 10 s while the threads record
     for worker in workers:
-        worker.join()
+        while worker.is_alive():
+            worker.join(timeout=10)
+            if worker.is_alive():
+                Progress(f"Recording: {min(time.monotonic() - start_time, duration):.0f} / {duration:g} s")
 
     if errors:
         raise errors[0]

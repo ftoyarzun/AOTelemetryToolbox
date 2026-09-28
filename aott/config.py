@@ -11,6 +11,7 @@ are run from. The other files in config/ are filled-in reference copies that no 
 """
 import os
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -22,6 +23,12 @@ CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 DATA_GRABBER_FILE = CONFIG_DIR / "data_grabber.toml"
 INSTRUMENT_FILE = CONFIG_DIR / "instrument.toml"
 ANALYSIS_FILE = CONFIG_DIR / "analysis.toml"
+
+
+def Progress(message):
+    """Print `message` with the local time, flushed at once, to follow a long run."""
+
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
 def AnalysisSettings(section, **given):

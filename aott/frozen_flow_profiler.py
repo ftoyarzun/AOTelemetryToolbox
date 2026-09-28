@@ -49,7 +49,7 @@ from scipy.optimize import least_squares
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve, lsqr, MatrixRankWarning
 
-from aott.config import AnalysisSettings
+from aott.config import AnalysisSettings, Progress
 from aott.observation_files import newest_file, output_dirs
 from aott.atmosphere_characterization_tools import (
     estimate_r0_L0,
@@ -527,13 +527,14 @@ def profile_file(file_name, signal=None, frame_delay=None, dm_sign=None, batch_s
     max_step = None if max_speed is None else max_speed / pixel_per_frame_to_mps
 
     batches =closed_loop_batches(is_closed, batch_size, min_run_lags * max_lag, transition_buffer)
+    Progress(f"Frozen flow: {len(batches)} closed-loop batches of up to {batch_size} frames, max lag {max_lag}")
 
     keys = ["Iteration_Times", "Batch_Frames", "Velocity", "Speed", "Direction", "Cn2_Fraction", "N_Layers",
             "V0", "r0", "r0_Zenith", "tau0", "tau0_Zenith", "Seeing", "Seeing_Zenith"]
     results = {k: [] for k in keys}
     fits = []
     for k, (start, end) in enumerate(batches):
-        print(f"Frozen flow: batch {k + 1}/{len(batches)} (frames {start}-{end})")
+        Progress(f"Frozen flow: batch {k + 1}/{len(batches)} (frames {start}-{end})")
         dm = dm_commands[start:end]
         if signal == "pol":
             commands, _ = reconstruct_pseudo_open_loop(dm_sign * dm, wfs_measurements[start:end],

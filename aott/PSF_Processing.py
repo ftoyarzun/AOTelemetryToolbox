@@ -17,7 +17,7 @@ from scipy.ndimage import maximum_filter
 
 import h5py
 
-from aott.config import AnalysisSettings
+from aott.config import AnalysisSettings, Progress
 from aott.observation_files import science_camera_group
 from aott.atmosphere_characterization_tools import (read_loop_status, find_status_runs, r0_at_zenith,
                                                      seeing_arcsec, seeing_at_zenith)
@@ -446,9 +446,7 @@ class PSF_Processing:
         self.long_exp_psf_model = psf_model
 
     def AnalyzeAllTheFile(self):
-        print('#####################')
-        print('Analysing PSFs')
-        print('#####################')
+        Progress(f'Analysing PSFs: {self.number_of_frames} frames, batches of {self.batch_size}')
         closed_r0, closed_sr_otf, closed_sr_fit, closed_psf_norm, closed_psf_model = [], [], [], [], []
         closed_jitter, closed_times = [], []
         open_r0, open_psf_norm, open_psf_model, open_jitter, open_times = [], [], [], [], []
@@ -479,6 +477,7 @@ class PSF_Processing:
                 start += size
                 print(f'{start} out of {self.number_of_frames} frames processed')
 
+            Progress(f'Centers of gravity, frames {run_start}-{run_end}')
             self.ComputeRunCenterOfGravity(batches, run_sum / (run_end - run_start))
             # Jitter per batch: the CoG spread within the batch
             for s, e in batches:
@@ -500,6 +499,7 @@ class PSF_Processing:
         self.open_loop_jitter = np.array(open_jitter, dtype=float).reshape(-1, 2)
         self.open_loop_iteration_times = open_times
 
+        Progress('Saving Science/Analysis')
         self.SaveAnalysis()
 
 

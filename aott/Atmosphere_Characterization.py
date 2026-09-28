@@ -1,7 +1,7 @@
 import numpy as np
 import h5py
 
-from aott.config import AnalysisSettings
+from aott.config import AnalysisSettings, Progress
 from aott.atmosphere_characterization_tools import (
     estimate_r0_L0,
     r0_at_zenith,
@@ -151,9 +151,7 @@ class Atmosphere_Characterization:
         return dict(iteration_time=float(self.dm_timestamps[batch_start]), psd=psd)
 
     def AnalyzeAllTheFile(self):
-        print('#####################')
-        print('Analysing AO Telemetry')
-        print('#####################')
+        Progress(f'Analysing AO telemetry: {self.number_of_frames} frames, batches of {self.batch_size}')
 
         scalar_keys = [
             "r0", "L0", "Effective_Gain", "Measured_Loop_Delay",
@@ -194,6 +192,7 @@ class Atmosphere_Characterization:
         self.open_psds = open_psds
         self.open_iteration_times = np.array(open_iteration_times)
 
+        Progress('Saving WFS/Analysis')
         self.SaveAnalysis()
 
     def SaveAnalysis(self):

@@ -25,7 +25,7 @@ from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 from astropy.time import Time
 from astroquery.simbad import Simbad
 
-from aott.config import LoadInstrument
+from aott.config import LoadInstrument, Progress
 from aott.DataGrabber import AsList, LoadConfig, ReadSample, RecordInParallel, Stream, StreamConfig, Window
 
 
@@ -126,6 +126,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
     Calibration.attrs["Total_Number_Of_Controlled_Modes"]; by default, the
     number of columns of M2C.
     """
+    Progress("Reading the data grabber and instrument configs")
     config = LoadConfig()
     instrument = LoadInstrument()
     camera = config["acquisition"]["analysed_camera"]
@@ -135,6 +136,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
     # Query SIMBAD before grabbing, so a typo in the target name is caught before any data is taken
     star = None
     if not no_simbad:
+        Progress(f"Querying SIMBAD for {target}")
         try:
             star = QueryTarget(target)
         except Exception as e:
@@ -143,6 +145,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
             sys.exit(f"SIMBAD doesn't know '{target}'. Check the name, or pass --no-simbad to grab anyway.")
         print(f"{target}: SIMBAD {star['main_id']}, V = {star['V']}")
 
+    Progress("Opening the shared memories")
     # Streams per thread, its pacer first, in the order their data comes back
     statics = config.get("static", {})
     threads = {}
@@ -170,6 +173,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
     if n_act != instrument["dm"]["n_actuators"]:
         print(f"WARNING: the DM commands have {n_act} actuators, the instrument file says "
               f"{instrument['dm']['n_actuators']} (saved as Total_Number_Of_Actuators)")
+    Progress("Reading the static entries (calibration files, backgrounds)")
     static = {}
     for name, entry in statics.items():
         static[name] = ReadStatic(config, entry)
@@ -197,6 +201,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
     elif not 1 <= controlled_modes <= n_modes:
         sys.exit(f"{controlled_modes} controlled modes: M2C has {n_modes} modes")
 
+    Progress(f"Recording {duration:g} s ({', '.join(threads)})")
     recordings = RecordInParallel({name: tuple(thread) for name, thread in threads.items()}, duration)
 
     for thread_name, recording in recordings.items():
@@ -219,6 +224,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
     safe_target = re.sub(r"[^A-Za-z0-9+.-]+", "_", target).strip("_")
     hdf5_path = save_folder / f"{safe_target}_{start:%Y-%m-%dT%H-%M-%S}.hdf5"
 
+    Progress(f"Writing {hdf5_path}")
     with h5py.File(hdf5_path, "w-") as file:
         file.attrs["Instrument"] = instrument["instrument"]["name"]
         file.attrs["Telescope"] = instrument["instrument"]["telescope"]
@@ -294,7 +300,7 @@ def acquire(target, duration, no_simbad=False, controlled_modes=None):
         if "Interaction_Matrix" in grp_calibration:
             grp_calibration["Interaction_Matrix"].attrs["Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
 
-    print(hdf5_path)
+    Progress(f"Observation saved: {hdf5_path}")
     return hdf5_path
 
 
