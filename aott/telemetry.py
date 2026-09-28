@@ -4,14 +4,15 @@ observation HDF5 file, with the same layout as simulation/DataGeneration.ipynb:
 
     python -m aott.telemetry <target> <duration_s> [--no-simbad]
 
-Settings come from config/data_grabber.toml and config/instrument.toml (see aott/config.py).
-The file is written to <hdf5_dir>/<UTC date>/<target>_<UTC date>T<HH-MM-SS>.hdf5, time
-of the start of the acquisition. The analysis and the report are run separately
+The threads, the shared memories each one records and the ones read once, and where
+each of them goes in the file, come from config/data_grabber.toml; the instrument
+values from config/instrument.toml (see aott/config.py). The file is written to
+<hdf5_dir>/<UTC date>/<target>_<UTC date>T<HH-MM-SS>.hdf5, time of the start of the
+acquisition. The analysis and the report are run separately
 (python -m aott.AutomaticAnalysis), or together with the grab by python -m aott.observe.
 """
 import argparse
 import datetime
-import math
 import re
 import sys
 from pathlib import Path
@@ -25,18 +26,11 @@ from astropy.time import Time
 from astroquery.simbad import Simbad
 
 from aott.config import LoadInstrument
-from aott.DataGrabber import LoadConfig, Stream, ReadSample, RecordInParallel
+from aott.DataGrabber import AsList, LoadConfig, ReadSample, RecordInParallel, Stream, StreamConfig, Window
 
 
-# Optional [calibration] keys of the data grabber config, and where they go in the HDF5 file.
-# A key that is left out (or "TODO") is not written.
-OPTIONAL_ARRAYS = {
-    "interaction_matrix": "Calibration/Interaction_Matrix",
-    "wfs_dark": "WFS/Dark",
-    "wfs_reference_frame": "WFS/Reference_Frame",
-    "dm_flat": "WFS/DM_flat",
-    "dm_offset": "WFS/DM_offset",
-}
+# Calibration matrices stored with the DM actuators along their first axis
+ACTUATOR_MATRICES = ("Calibration/M2C", "Calibration/Z2C")
 
 
 def QueryTarget(name):
@@ -96,20 +90,44 @@ def ActuatorsFirst(matrix, n_act, name):
     sys.exit(f"{name}: can't tell which axis holds the {n_act} DM actuators in shape {matrix.shape}")
 
 
+def ReadStatic(config, entry):
+    """The array of a static entry: its `value`, or its `source` read once, cropped
+    like the stream its `window_of` names."""
+    if "value" in entry:
+        return np.asarray(entry["value"])
+    stream = StreamConfig(config, entry["window_of"]) if "window_of" in entry else {}
+    return LoadArray(entry["source"], Window(stream), stream.get("sliceable", True))
+
+
+def Scalar(array):
+    """The [0, 0] element of a scalar setting's image."""
+    return np.asarray(array).flat[0]
+
+
+def WriteAttr(file, destination, value):
+    """Write `value` to the attr destination "path@Name" ("@Name" for the root), creating
+    `path` as a group if nothing is there yet."""
+    path, _, name = destination.rpartition("@")
+    if not path:
+        target = file
+    elif path in file:
+        target = file[path]
+    else:
+        target = file.require_group(path)
+    target.attrs[name] = value
+
+
 def acquire(target, duration, no_simbad=False):
     """
-    Grab `duration` seconds of telemetry and PSFs of `target`, write the
-    observation HDF5 file and return its path. Exits before grabbing if the
+    Grab `duration` seconds of every thread of the data grabber config for `target`,
+    write the observation HDF5 file and return its path. Exits before grabbing if the
     config is incomplete or, unless `no_simbad`, SIMBAD doesn't know the target.
     """
     config = LoadConfig()
     instrument = LoadInstrument()
-
-    background_subtracted = config["acquisition"].get("science_background_subtracted", True)
-    sliceable = config["acquisition"].get("science_shm_sliceable", True)
-    background_path = config["shm"]["science"].get("background", "TODO")
-    if not background_subtracted and background_path == "TODO":
-        sys.exit("science_background_subtracted = false needs the background shm in [shm.science] background")
+    camera = config["acquisition"]["analysed_camera"]
+    if camera not in instrument["science_camera"]:
+        sys.exit(f"analysed_camera = '{camera}' has no [science_camera.{camera}] section in the instrument config")
 
     # Query SIMBAD before grabbing, so a typo in the target name is caught before any data is taken
     star = None
@@ -122,74 +140,61 @@ def acquire(target, duration, no_simbad=False):
             sys.exit(f"SIMBAD doesn't know '{target}'. Check the name, or pass --no-simbad to grab anyway.")
         print(f"{target}: SIMBAD {star['main_id']}, V = {star['V']}")
 
-    shm_paths = config["shm"]
-    wfs_frames_shm = dao.shm(shm_paths["wfs"]["frames"])
-    wfs_measurements_shm = dao.shm(shm_paths["wfs"]["measurements"])
-    dm_shm = dao.shm(shm_paths["dm"]["commands"])
-    loop_cmd_shm = dao.shm(shm_paths["loop"]["cmd"])
-    psf_shm = dao.shm(shm_paths["science"]["frames"])
-
-    sem_nb = config["acquisition"]["semaphore"]
-    wfs_frame_step = config["acquisition"].get("wfs_frame_step", 1)
-
-    # Optional window of the science frame to read, empty means the whole frame
-    crop = config["acquisition"].get("science_crop")
-    psf_window = {"y": slice(*crop["y"]), "x": slice(*crop["x"])} if crop else {}
+    # Streams per thread, its pacer first, in the order their data comes back
+    statics = config.get("static", {})
+    threads = {}
+    stream_configs = {}
+    n_act = None
+    for thread_name, thread in config["threads"].items():
+        names = [thread["pacer"]] + [name for name in thread["streams"] if name != thread["pacer"]]
+        stream_configs[thread_name] = [thread["streams"][name] for name in names]
+        streams = []
+        for stream_config in stream_configs[thread_name]:
+            stream = Stream(dao.shm(stream_config["shm"]),
+                            keep_every=stream_config.get("keep_every", 1),
+                            window=Window(stream_config),
+                            sliceable=stream_config.get("sliceable", True),
+                            record_timestamps="timestamps" in stream_config,
+                            mean="mean" in stream_config,
+                            saturation_level=stream_config.get("saturation_level"))
+            if stream_config["dataset"] == "WFS/DM_commands":
+                n_act = np.asarray(stream.shm.get_data()).size
+            streams.append(stream)
+        threads[thread_name] = [streams, thread.get("semaphore", config["acquisition"]["semaphore"]), None]
 
     # Static values, read once. The calibration arrays are checked against the DM
     # command size here, so a wrong file stops the script before the acquisition.
-    wfs_pup = dao.shm(shm_paths["wfs"]["valid_pixel_map"]).get_data()
-    dm_map = dao.shm(shm_paths["dm"]["dm_map"]).get_data()
-    loop_gain = dao.shm(shm_paths["loop"]["gain"]).get_data()[0, 0]
-    loop_leak = dao.shm(shm_paths["loop"]["leak"]).get_data()[0, 0]
-    wfs_fps = dao.shm(shm_paths["wfs"]["fps"]).get_data()[0, 0]
-    wfs_gain = dao.shm(shm_paths["wfs"]["gain"]).get_data()[0, 0]
-    sci_dit = dao.shm(shm_paths["science"]["dit"]).get_data()[0, 0]
-    sci_fps = dao.shm(shm_paths["science"]["fps"]).get_data()[0, 0]
-    sci_gain = dao.shm(shm_paths["science"]["gain"]).get_data()[0, 0]
-
-    n_act = dm_shm.get_data().size
     if n_act != instrument["dm"]["n_actuators"]:
         print(f"WARNING: the DM commands have {n_act} actuators, the instrument file says "
               f"{instrument['dm']['n_actuators']} (saved as Total_Number_Of_Actuators)")
+    static = {}
+    for name, entry in statics.items():
+        static[name] = ReadStatic(config, entry)
+        if any(path in ACTUATOR_MATRICES for path in AsList(entry.get("dataset", []))):
+            static[name] = ActuatorsFirst(static[name], n_act, f"static.{name}")
 
-    m2c = ActuatorsFirst(dao.shm(shm_paths["dm"]["m2c"]).get_data(), n_act, "shm.dm.m2c")
-    z2c = ActuatorsFirst(LoadArray(config["calibration"]["Z2C"]), n_act, "calibration.Z2C")
+    for thread_name, thread in config["threads"].items():
+        streams = threads[thread_name][0]
+        if "rate" in thread:
+            threads[thread_name][2] = float(Scalar(static[thread["rate"]]))
+        # Backgrounds are cropped like their stream (window_of), and subtracted from every sample
+        for k, stream_config in enumerate(stream_configs[thread_name]):
+            if "background" in stream_config:
+                background = static[stream_config["background"]].astype(np.float32)
+                frame_shape = np.squeeze(ReadSample(streams[k])).shape
+                if background.shape != frame_shape:
+                    sys.exit(f"static.{stream_config['background']}: shape {background.shape}, "
+                             f"the frames of threads.{thread_name} are {frame_shape}")
+                streams[k] = streams[k]._replace(background=background)
 
-    optional = {}
-    for key, path in config["calibration"].items():
-        if key in OPTIONAL_ARRAYS and path != "TODO":
-            optional[key] = LoadArray(path)
+    recordings = RecordInParallel({name: tuple(thread) for name, thread in threads.items()}, duration)
 
-    # Science background, cropped like the frames, read once: it doesn't change during the grab
-    psf_stream = Stream(psf_shm, window=psf_window, sliceable=sliceable)
-    science_dark = None
-    if background_path != "TODO":
-        science_dark = LoadArray(background_path, psf_window, sliceable)
-        frame_shape = np.squeeze(ReadSample(psf_stream)).shape
-        if science_dark.shape != frame_shape:
-            sys.exit(f"shm.science.background: shape {science_dark.shape}, the science frames are {frame_shape}")
-        if not background_subtracted:
-            psf_stream = psf_stream._replace(background=science_dark.astype(np.float32))
+    for thread_name, recording in recordings.items():
+        rate = threads[thread_name][2]
+        expected = f", about {rate * duration:.0f} expected" if rate else ""
+        print(f"{thread_name}: {len(recording.timestamps)} iterations{expected}")
 
-    wfs_rec, psf_rec = RecordInParallel(
-        [
-            [Stream(wfs_frames_shm, keep_every=wfs_frame_step), Stream(dm_shm), Stream(wfs_measurements_shm),
-             Stream(loop_cmd_shm)],
-            [psf_stream],
-        ],
-        duration,
-        sem_nb,
-        rates=[wfs_fps, sci_fps],
-    )
-
-    print(f"WFS Camera: {len(wfs_rec.timestamps)} frames")
-    print(f"PSF Camera: {len(psf_rec.timestamps)} frames")
-
-    wfs_frames, dm_commands, wfs_measurements, loop_status = wfs_rec.data
-    (psf_frames,) = psf_rec.data
-
-    start_time = min(wfs_rec.timestamps[0], psf_rec.timestamps[0])
+    start_time = min(recording.timestamps[0] for recording in recordings.values())
     start = datetime.datetime.fromtimestamp(start_time, tz=datetime.timezone.utc)
 
     if star is not None:
@@ -208,29 +213,43 @@ def acquire(target, duration, no_simbad=False):
         file.attrs["Instrument"] = instrument["instrument"]["name"]
         file.attrs["Telescope"] = instrument["instrument"]["telescope"]
 
-        grp_wfs = file.create_group("WFS")
-        grp_wfs.attrs["Loop_Gain"] = loop_gain
-        grp_wfs.attrs["Loop_Leak"] = loop_leak
-        grp_wfs.attrs["Loop_Freq"] = wfs_fps
+        for thread_name, recording in recordings.items():
+            for stream_config, data, timestamps, mean, peak in zip(
+                    stream_configs[thread_name], recording.data, recording.stream_timestamps,
+                    recording.means, recording.maxima):
+                dset = file.create_dataset(stream_config["dataset"], data=data)
+                dset.attrs["Frame_Step"] = stream_config.get("keep_every", 1)
+                if "description" in stream_config:
+                    dset.attrs["Description"] = stream_config["description"]
+                if "window" in stream_config:
+                    # [y start, y stop, x start, x stop] of the frame, in pixels
+                    dset.attrs["Window"] = [*stream_config["window"]["y"], *stream_config["window"]["x"]]
+                if "timestamps" in stream_config:
+                    file.create_dataset(stream_config["timestamps"], data=timestamps)
+                if "mean" in stream_config:
+                    file.create_dataset(stream_config["mean"], data=mean)
+                if peak is not None:
+                    level = stream_config["saturation_level"]
+                    dset.attrs["Max_Value"] = peak
+                    dset.attrs["Saturation_Level"] = level
+                    dset.attrs["Saturated"] = bool(peak > level)
+                    if peak > level:
+                        print(f"WARNING: {stream_config['dataset']} reached {peak}, above {level}")
 
-        dset_wfs = grp_wfs.create_dataset("WFS_Images", data=wfs_frames)
-        dset_wfs.attrs["Gain"] = wfs_gain
-        dset_wfs.attrs["FPS"] = wfs_fps
-        dset_wfs.attrs["Frame_Step"] = wfs_frame_step
-        grp_wfs.create_dataset("WFS_TimeStamps", data=wfs_rec.timestamps[::wfs_frame_step])
+        # Datasets before attrs, so an attr destination on a dataset finds it
+        for name, entry in statics.items():
+            for path in AsList(entry.get("dataset", [])):
+                dset = file.create_dataset(path, data=static[name])
+                if "description" in entry:
+                    dset.attrs["Description"] = entry["description"]
+        for name, entry in statics.items():
+            for destination in AsList(entry.get("attr", [])):
+                WriteAttr(file, destination, Scalar(static[name]))
 
-        grp_wfs.create_dataset("Valid_Pixel_Map", data=wfs_pup)
-        grp_wfs.create_dataset("DM_Map", data=dm_map)
-        grp_wfs.create_dataset("DM_commands", data=dm_commands)
-        grp_wfs.create_dataset("DM_TimeStamps", data=wfs_rec.timestamps)
-        grp_wfs.create_dataset("WFS_measurements", data=wfs_measurements)
-        # Loop command at every loop iteration (nonzero = closed loop), the open/closed status
-        # the analysis reads. The notebook stores it as the loop_status attribute, a dataset
-        # here because attributes are limited to 64 kB.
-        grp_wfs.create_dataset("loop_status", data=loop_status)
-
-        grp_science = file.create_group("Science")
+        grp_science = file.require_group("Science")
         grp_science.attrs["Target"] = target
+        # The Science/<camera> group the analysis reads
+        grp_science.attrs["Analysed_Camera"] = camera
         # degrees, at the start of the acquisition
         grp_science.attrs["Elevation"] = elevation
         if star is not None:
@@ -243,36 +262,27 @@ def acquire(target, duration, no_simbad=False):
             grp_science.attrs["Rmag"] = star["R"]
             grp_science.attrs["Jmag"] = star["J"]
             grp_science.attrs["Hmag"] = star["H"]
-        grp_science.create_dataset("PSF_TimeStamps", data=psf_rec.timestamps)
 
-        science_camera = instrument["science_camera"]
-        dset_science = grp_science.create_dataset("Science_PSFs", data=psf_frames)
-        dset_science.attrs["Exposure_Time"] = sci_dit
-        dset_science.attrs["FPS"] = sci_fps
-        dset_science.attrs["Gain"] = sci_gain
-        dset_science.attrs["Sampling"] = science_camera["sampling_at_calibration"]
-        dset_science.attrs["Wavelength"] = science_camera["wvl_nm"] * 1e-9
-        dset_science.attrs["Bandpass"] = science_camera["bandpass_nm"] * 1e-9
-        if science_dark is not None:
-            grp_science.create_dataset("Dark", data=science_dark)
+        for name, science_camera in instrument["science_camera"].items():
+            if f"Science/{name}/Science_PSFs" not in file:
+                continue
+            dset_science = file[f"Science/{name}/Science_PSFs"]
+            dset_science.attrs["Sampling"] = science_camera["sampling_at_calibration"]
+            dset_science.attrs["Wavelength"] = science_camera["wvl_nm"] * 1e-9
+            dset_science.attrs["Bandpass"] = science_camera["bandpass_nm"] * 1e-9
+            dset_science.attrs["Calibration_Wavelength"] = science_camera["calibration_wvl_nm"] * 1e-9
 
-        grp_calibration = file.create_group("Calibration")
-        grp_calibration.create_dataset("M2C", data=m2c)
-        grp_calibration.create_dataset("Z2C", data=z2c)
+        grp_calibration = file.require_group("Calibration")
         grp_calibration.attrs["Diameter"] = instrument["telescope"]["diameter_m"]
         grp_calibration.attrs["Obstruction_ratio"] = instrument["telescope"]["obstruction_ratio"]
-        grp_calibration.attrs["Science_Calibration_Wavelength"] = science_camera["calibration_wvl_nm"] * 1e-9
         grp_calibration.attrs["AO_Calibration_Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
         grp_calibration.attrs["SkyCalibPupilRatio"] = instrument["dm"]["sky_calib_pupil_ratio"]
         grp_calibration.attrs["Actuators_in_diameter"] = instrument["dm"]["actuators_in_diameter"]
         grp_calibration.attrs["Total_Number_Of_Actuators"] = instrument["dm"]["n_actuators"]
-        grp_calibration.attrs["Total_Number_Of_Controlled_Modes"] = m2c.shape[1]
+        grp_calibration.attrs["Total_Number_Of_Controlled_Modes"] = file["Calibration/M2C"].shape[1]
         grp_calibration.attrs["r0_reference_wvl"] = instrument["conventions"]["r0_reference_wvl_nm"] * 1e-9
-
-        for key, data in optional.items():
-            file.create_dataset(OPTIONAL_ARRAYS[key], data=data)
-        if "interaction_matrix" in optional:
-            file["Calibration/Interaction_Matrix"].attrs["Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
+        if "Interaction_Matrix" in grp_calibration:
+            grp_calibration["Interaction_Matrix"].attrs["Wavelength"] = instrument["wfs"]["interaction_matrix_wvl_nm"] * 1e-9
 
     print(hdf5_path)
     return hdf5_path

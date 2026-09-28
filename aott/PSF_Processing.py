@@ -18,6 +18,7 @@ from scipy.ndimage import maximum_filter
 import h5py
 
 from aott.config import AnalysisSettings
+from aott.observation_files import science_camera_group
 from aott.atmosphere_characterization_tools import (read_loop_status, find_status_runs, r0_at_zenith,
                                                      seeing_arcsec, seeing_at_zenith)
 
@@ -287,15 +288,18 @@ class PSF_Processing:
             
 
             science_grp = file['Science']
+            # The analysed camera's group: Science/<camera>, or Science in older files
+            camera_grp = science_camera_group(file)
+            self.camera_path = camera_grp.name
             dm_timestamps = file['WFS']['DM_TimeStamps'][:]
             frame_loop_status = read_loop_status(file['WFS'])
             self.target_name = science_grp.attrs['Target']
             self.elevation = science_grp.attrs['Elevation']
             # A dataset since telemetry.py, an attribute in older files
-            if 'PSF_TimeStamps' in science_grp:
-                self.time_stamps = science_grp['PSF_TimeStamps'][:]
+            if 'PSF_TimeStamps' in camera_grp:
+                self.time_stamps = camera_grp['PSF_TimeStamps'][:]
             else:
-                self.time_stamps = science_grp.attrs['PSF_TimeStamps'][:]
+                self.time_stamps = camera_grp.attrs['PSF_TimeStamps'][:]
 
             # Align the WFS/DM-cadence open/closed status to each Science frame
             # by nearest timestamp -- the science camera and the WFS/DM loop
@@ -304,15 +308,15 @@ class PSF_Processing:
             wfs_idx = np.clip(wfs_idx, 0, len(dm_timestamps) - 1)
             self.frame_is_closed_loop = frame_loop_status[wfs_idx]
 
-            science_frames_dset = science_grp['Science_PSFs']
-            self.exposure_time = science_frames_dset.attrs['Exposure_Time']
+            science_frames_dset = camera_grp['Science_PSFs']
+            self.exposure_time = science_frames_dset.attrs.get('Exposure_Time')
             # The science camera runs at its own rate, not synchronized with the
             # loop: the rate comes from its timestamps
             self.fps = frame_rate(self.time_stamps, science_frames_dset.attrs['FPS'])
             self.period = 1 / self.fps
             # batch_duration is in seconds
             self.batch_size = max(round(self.batch_duration * self.fps), 1)
-            self.gain = science_frames_dset.attrs['Gain']
+            self.gain = science_frames_dset.attrs.get('Gain')
             self.sampling_calib = science_frames_dset.attrs['Sampling']
 
             calibration_grp = file['Calibration']
@@ -323,7 +327,11 @@ class PSF_Processing:
             self.Diameter = calibration_grp.attrs['Diameter']
             self.Obstruction_ratio = calibration_grp.attrs['Obstruction_ratio']
             self.r0_reference_wvl = calibration_grp.attrs["r0_reference_wvl"]
-            self.wvl_calib = calibration_grp.attrs['Science_Calibration_Wavelength']
+            # Per camera, or in the Calibration group in older files
+            if 'Calibration_Wavelength' in science_frames_dset.attrs:
+                self.wvl_calib = science_frames_dset.attrs['Calibration_Wavelength']
+            else:
+                self.wvl_calib = calibration_grp.attrs['Science_Calibration_Wavelength']
             self.wvl_sky = science_frames_dset.attrs['Wavelength']
             self.instrument = Instrument(D=self.Diameter, 
                                          occ=self.Obstruction_ratio,
@@ -341,7 +349,7 @@ class PSF_Processing:
             self.cx = None
             self.cy = None
 
-            self.number_of_frames = file['Science']['Science_PSFs'].shape[0]
+            self.number_of_frames = science_frames_dset.shape[0]
 
             # NaN for frames never analysed (the transition buffer)
             self.cogs_x = np.full(science_frames_dset.shape[0], np.nan)
@@ -398,7 +406,7 @@ class PSF_Processing:
 
     def LoadData(self, start, size):
         with h5py.File(self.file_name, "r") as file:
-            self.science_frames = file['Science']['Science_PSFs'][start:start + size].astype(np.float32)
+            self.science_frames = file[self.camera_path]['Science_PSFs'][start:start + size].astype(np.float32)
 
         self.batch_start = start
         self.time_stamp = self.time_stamps[start]
@@ -511,7 +519,7 @@ class PSF_Processing:
         weighting_map, gain = WCoGCalibration(mean_frame, self.sampling)
         run_start, run_end = batches[0][0], batches[-1][1]
         with h5py.File(self.file_name, "r") as file:
-            frames = file['Science']['Science_PSFs']
+            frames = file[self.camera_path]['Science_PSFs']
             for start, end in batches:
                 self.cogs_x[start:end], self.cogs_y[start:end] = ComputeWCoG(
                     self.CoGWindow(frames, slice(start, end)).astype(np.float32), self.sampling, weighting_map, gain)
@@ -647,6 +655,8 @@ class PSF_Processing:
             analysis_grp.attrs['Batch_Duration_s'] = self.batch_duration
             analysis_grp.attrs['Transition_Buffer_Frames'] = self.transition_buffer
             analysis_grp.attrs['Frame_Rate_Hz'] = self.fps
+            if 'Analysed_Camera' in sci_grp.attrs:
+                analysis_grp.attrs['Camera'] = sci_grp.attrs['Analysed_Camera']
 
 
             write_or_replace(analysis_grp_se,'CoG-X', data = self.cogs_x)

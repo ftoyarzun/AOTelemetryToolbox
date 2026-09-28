@@ -1,0 +1,222 @@
+# Data grabber configuration for the Ekarus machine.
+# Not read by any code: copy these values into data_grabber.toml to use them, and name
+# the instrument config's science camera section [science_camera.orca].
+# See data_grabber.toml for what each entry means.
+
+[acquisition]
+semaphore = 8
+analysed_camera = "orca"
+cpus = [12, 13, 14]
+
+[output]
+hdf5_dir = "/home/daouser/DAODATA/hdf5"
+report_dir = "/home/daouser/DAODATA/AOReports"
+
+
+# ---------------------------------------------------------------- loop thread
+
+[threads.loop]
+pacer = "wfs_frames"
+rate = "wfs_fps"
+
+[threads.loop.streams.wfs_frames]
+# OCAM frames, descrambled, background subtracted and flat fielded
+shm = "/tmp/ocam2Cal.im.shm"
+dataset = "WFS/WFS_Images"
+timestamps = "WFS/WFS_TimeStamps"
+keep_every = 100
+mean = "WFS/Mean_Frame"
+
+[threads.loop.streams.dm_commands]
+# DM channel 1, the output of the leaky integrator
+shm = "/tmp/dm1Cmd01.im.shm"
+dataset = "WFS/DM_commands"
+timestamps = "WFS/DM_TimeStamps"
+
+[threads.loop.streams.wfs_measurements]
+# modal reconstruction times M2C: the zonal DM commands of the residual
+shm = "/tmp/dm1resWf.im.shm"
+dataset = "WFS/WFS_measurements"
+
+[threads.loop.streams.loop_status]
+shm = "/tmp/dm1_lpCmd.im.shm"
+dataset = "WFS/loop_status"
+
+[threads.loop.streams.dm_total_commands]
+shm = "/tmp/dm1Cmd.im.shm"
+dataset = "WFS/DM_Total_Commands"
+description = "command sent to the DM, the sum of all its channels"
+
+[threads.loop.streams.dm_channel_0]
+shm = "/tmp/dm1Cmd00.im.shm"
+dataset = "WFS/DM_Channel_0"
+description = "DM channel 0: DM flat"
+
+# DM channel 1 is WFS/DM_commands
+
+[threads.loop.streams.dm_channel_2]
+shm = "/tmp/dm1Cmd02.im.shm"
+dataset = "WFS/DM_Channel_2"
+description = "DM channel 2: additional control channel (turbulence)"
+
+[threads.loop.streams.dm_channel_3]
+shm = "/tmp/dm1Cmd03.im.shm"
+dataset = "WFS/DM_Channel_3"
+description = "DM channel 3: additional control channel (offset)"
+
+[threads.loop.streams.reconstructed_modes]
+shm = "/tmp/wfs1Modes.im.shm"
+dataset = "WFS/Reconstructed_Modes"
+description = "modal coefficients reconstructed from the WFS signals"
+
+[threads.loop.streams.wfs_signals]
+shm = "/tmp/ocam2Centroids.im.shm"
+dataset = "WFS/WFS_Signals"
+description = "reduced pyramid intensities (background subtracted, flux normalized)"
+
+[threads.loop.streams.fast_tt_commands]
+shm = "/tmp/fasttt.im.shm"
+dataset = "Fast_TT/Commands"
+
+[threads.loop.streams.fast_tt_loop_status]
+shm = "/tmp/fast_tt_lpCmd.im.shm"
+dataset = "Fast_TT/loop_status"
+description = "fast tip-tilt loop command, nonzero = closed loop"
+
+[threads.loop.streams.telescope_offset]
+shm = "/tmp/telOffset.im.shm"
+dataset = "Telescope_Data/Offset"
+description = "[x, y] pointing offset sent to the telescope [arcsec], one row per WFS/DM_TimeStamps"
+
+[threads.loop.streams.telescope_guiding]
+shm = "/tmp/telGuiding.im.shm"
+dataset = "Telescope_Data/Guiding"
+description = "[x, y] guiding correction sent to the telescope [arcsec], one row per WFS/DM_TimeStamps"
+
+[threads.loop.streams.telescope_radec]
+shm = "/tmp/telRaDec.im.shm"
+dataset = "Telescope_Data/RA_Dec"
+description = "[RA, Dec] telescope position [deg], one row per WFS/DM_TimeStamps"
+
+
+# ---------------------------------------------------------------- ORCA thread
+
+[threads.orca]
+pacer = "frames"
+rate = "orca_fps"
+
+[threads.orca.streams.frames]
+shm = "/tmp/orca.im.shm"
+dataset = "Science/orca/Science_PSFs"
+timestamps = "Science/orca/PSF_TimeStamps"
+# the shm frames are not background subtracted
+background = "orca_background"
+saturation_level = 65400
+# window = { y = [965, 1215], x = [775, 1025] }
+
+
+# ---------------------------------------------------------------- read once: WFS
+
+[static.wfs_fps]
+source = "/tmp/ocam2fps.im.shm"
+attr = ["WFS/WFS_Images@FPS", "WFS@Loop_Freq"]
+
+[static.wfs_gain]
+source = "/tmp/ocam2gain.im.shm"
+attr = "WFS/WFS_Images@Gain"
+
+[static.wfs_temperature]
+source = "/tmp/ocam2temp.im.shm"
+attr = "WFS/WFS_Images@Temperature"
+
+[static.valid_pixel_map]
+source = "/tmp/papyrus_valid_mask.im.shm"
+dataset = "WFS/Valid_Pixel_Map"
+
+[static.wfs_dark]
+source = "/tmp/ocam2Bg.im.shm"
+dataset = "WFS/Dark"
+
+[static.wfs_flat]
+source = "/tmp/ocam2Ff.im.shm"
+dataset = "WFS/Flat_Field"
+
+[static.wfs_reference_frame]
+source = "/tmp/ocam2Ref.im.shm"
+dataset = "WFS/Reference_Frame"
+
+[static.modulator]
+source = "/tmp/modulator.im.shm"
+dataset = "WFS/Modulator"
+description = "modulator shm: [0, 0] frequency, [1, 0] radius, [4, 0] on/off"
+
+# ---------------------------------------------------------------- read once: loop and DM
+
+[static.dm_map]
+source = "/tmp/dm1Map.im.shm"
+dataset = "WFS/DM_Map"
+
+[static.dm_offset]
+source = "/tmp/dm1CmdOffset.im.shm"
+dataset = "WFS/DM_offset"
+
+[static.loop_gain]
+source = "/tmp/dm1_lpGain.im.shm"
+attr = "WFS@Loop_Gain"
+
+[static.loop_leak]
+source = "/tmp/dm1_lpLeak.im.shm"
+attr = "WFS@Loop_Leak"
+
+[static.m2c]
+source = "/tmp/dm1m2c.im.shm"
+dataset = "Calibration/M2C"
+
+[static.z2c]
+source = "/home/daouser/dao/Ekarus/dev/foyarzun/Data/Z2C_normalized.npy"
+dataset = "Calibration/Z2C"
+
+[static.s2m]
+source = "/tmp/papyrus_CM.im.shm"
+dataset = "Calibration/S2M"
+description = "pyramid signals to modes reconstructor"
+
+# ---------------------------------------------------------------- read once: fast tip-tilt
+
+[static.fast_tt_reconstructor]
+source = "/tmp/pupil_2_fastTT_rec.im.shm"
+dataset = "Fast_TT/Reconstructor"
+description = "pyramid flux to fast tip-tilt reconstructor"
+
+[static.fast_tt_loop_gain]
+source = "/tmp/fast_tt_lpGain.im.shm"
+attr = "Fast_TT@Loop_Gain"
+
+[static.fast_tt_loop_leak]
+source = "/tmp/fast_tt_lpLeak.im.shm"
+attr = "Fast_TT@Loop_Leak"
+
+# ---------------------------------------------------------------- read once: ORCA
+
+[static.orca_fps]
+source = "/tmp/orcaFps.im.shm"
+attr = "Science/orca/Science_PSFs@FPS"
+
+[static.orca_dit]
+source = "/tmp/orcaDit.im.shm"
+attr = "Science/orca/Science_PSFs@Exposure_Time"
+
+[static.orca_temperature]
+source = "/tmp/orcaTemp.im.shm"
+attr = "Science/orca/Science_PSFs@Temperature"
+
+[static.orca_background]
+# cropped like the frames, and subtracted from them
+source = "/tmp/orcaBg.im.shm"
+dataset = "Science/orca/Dark"
+window_of = "orca.frames"
+
+# the full-frame background, worth keeping when the frames have a window
+# [static.orca_background_full]
+# source = "/tmp/orcaBg.im.shm"
+# dataset = "Science/orca/Dark_Full_Frame"

@@ -44,7 +44,9 @@ emccd = 0
 # modulation radius in units of lambda/DM
 modulation = 2
 
-[science_camera]
+# One section per science camera, named like its Science/<name> group in the data
+# grabber config (see its [acquisition] analysed_camera)
+[science_camera.camera]
 # central wavelength of the science filter [nm]
 wvl_nm = 1550
 # bandpass of the science filter [nm]

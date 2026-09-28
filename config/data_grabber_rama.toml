@@ -1,42 +1,91 @@
 # Data grabber configuration for the "rama" machine.
 # Not read by any code: copy these values into data_grabber.toml to use them.
-# See data_grabber.toml for what each value means.
-
-[shm.wfs]
-frames = "/tmp/pyrImCalExtract.im.shm"
-valid_pixel_map = "/tmp/pyrPup.im.shm"
-measurements = "/tmp/pyrModesNN.im.shm"
-fps = "/tmp/pyrImFps.im.shm"
-gain = "/tmp/pyrImGain.im.shm"
-
-[shm.dm]
-commands = "/tmp/dm1Cmd.im.shm"
-m2c = "/tmp/dm1M2A.im.shm"
-# dm actuator grid map
-dm_map = "/tmp/dm1Map.im.shm"
-
-[shm.loop]
-cmd = "/tmp/lpCmdNN.im.shm"
-gain = "/tmp/lpGain.im.shm"
-leak = "/tmp/lpLeak.im.shm"
-
-[shm.science]
-frames = "/tmp/sciImCal.im.shm"
-dit = "/tmp/sciImDit.im.shm"
-fps = "/tmp/sciImFps.im.shm"
-gain = "/tmp/sciImGain.im.shm"
+# See data_grabber.toml for what each entry means.
 
 [acquisition]
 semaphore = 8
-wfs_frame_step = 100
-
-[acquisition.science_crop]
-y = [400, 800]
-x = [800, 1200]
-
-[calibration]
-Z2C = "/home/rama/rama-dev/foyarzun/CNN/Data/Z2C.npy"
+analysed_camera = "camera"
 
 [output]
 hdf5_dir = "/home/rama/DAODATA/telemetry_hdf5"
 report_dir = "/home/rama/rama-dev/telemetry_analysis/Reports"
+
+
+[threads.loop]
+pacer = "wfs_frames"
+rate = "wfs_fps"
+
+[threads.loop.streams.wfs_frames]
+shm = "/tmp/pyrImCalExtract.im.shm"
+dataset = "WFS/WFS_Images"
+timestamps = "WFS/WFS_TimeStamps"
+keep_every = 100
+
+[threads.loop.streams.dm_commands]
+shm = "/tmp/dm1Cmd.im.shm"
+dataset = "WFS/DM_commands"
+timestamps = "WFS/DM_TimeStamps"
+
+[threads.loop.streams.wfs_measurements]
+shm = "/tmp/pyrModesNN.im.shm"
+dataset = "WFS/WFS_measurements"
+
+[threads.loop.streams.loop_status]
+shm = "/tmp/lpCmdNN.im.shm"
+dataset = "WFS/loop_status"
+
+
+[threads.camera]
+pacer = "frames"
+rate = "camera_fps"
+
+[threads.camera.streams.frames]
+shm = "/tmp/sciImCal.im.shm"
+dataset = "Science/camera/Science_PSFs"
+timestamps = "Science/camera/PSF_TimeStamps"
+window = { y = [400, 800], x = [800, 1200] }
+
+
+[static.wfs_fps]
+source = "/tmp/pyrImFps.im.shm"
+attr = ["WFS/WFS_Images@FPS", "WFS@Loop_Freq"]
+
+[static.wfs_gain]
+source = "/tmp/pyrImGain.im.shm"
+attr = "WFS/WFS_Images@Gain"
+
+[static.valid_pixel_map]
+source = "/tmp/pyrPup.im.shm"
+dataset = "WFS/Valid_Pixel_Map"
+
+[static.dm_map]
+source = "/tmp/dm1Map.im.shm"
+dataset = "WFS/DM_Map"
+
+[static.m2c]
+source = "/tmp/dm1M2A.im.shm"
+dataset = "Calibration/M2C"
+
+[static.z2c]
+source = "/home/rama/rama-dev/foyarzun/CNN/Data/Z2C.npy"
+dataset = "Calibration/Z2C"
+
+[static.loop_gain]
+source = "/tmp/lpGain.im.shm"
+attr = "WFS@Loop_Gain"
+
+[static.loop_leak]
+source = "/tmp/lpLeak.im.shm"
+attr = "WFS@Loop_Leak"
+
+[static.camera_fps]
+source = "/tmp/sciImFps.im.shm"
+attr = "Science/camera/Science_PSFs@FPS"
+
+[static.camera_dit]
+source = "/tmp/sciImDit.im.shm"
+attr = "Science/camera/Science_PSFs@Exposure_Time"
+
+[static.camera_gain]
+source = "/tmp/sciImGain.im.shm"
+attr = "Science/camera/Science_PSFs@Gain"

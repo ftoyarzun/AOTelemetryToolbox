@@ -17,6 +17,7 @@ from pathlib import Path
 
 from aott.atmosphere_characterization_tools import find_status_runs
 from aott.frozen_flow_profiler import plot_correlation, plot_layer_maps, plot_layer_profile, read_first_batch
+from aott.observation_files import science_camera_group
 
 
 def GetSignalPSD(signal, period):
@@ -204,9 +205,10 @@ class AnalysisViewer:
 
             if "Science" in file:
                 sci_grp = file["Science"]
+                psfs = science_camera_group(file)["Science_PSFs"]
                 # The frame rate PSF_Processing used (from the frame timestamps),
                 # or the FPS attr in files analysed before it was stored
-                self.fps = sci_grp["Science_PSFs"].attrs["FPS"]
+                self.fps = psfs.attrs["FPS"]
                 if "Analysis" in sci_grp and "Frame_Rate_Hz" in sci_grp["Analysis"].attrs:
                     self.fps = float(sci_grp["Analysis"].attrs["Frame_Rate_Hz"])
 
@@ -264,8 +266,8 @@ class AnalysisViewer:
                         if "Jitter_OpenLoop" in short_exp_grp and short_exp_grp["Jitter_OpenLoop"].shape[0] > 0:
                             self.open_loop_jitter = short_exp_grp["Jitter_OpenLoop"][:]
 
-                    self.psf_wavelength = sci_grp["Science_PSFs"].attrs["Wavelength"]
-                    self.psf_sampling = sci_grp["Science_PSFs"].attrs["Sampling"]
+                    self.psf_wavelength = psfs.attrs["Wavelength"]
+                    self.psf_sampling = psfs.attrs["Sampling"]
                     calibration_grp = file["Calibration"]
                     self.diameter = calibration_grp.attrs["Diameter"]
                     self.Obstruction_ratio = calibration_grp.attrs['Obstruction_ratio']

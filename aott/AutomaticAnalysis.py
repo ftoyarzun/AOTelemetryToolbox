@@ -20,6 +20,20 @@ import h5py
 from datetime import datetime, timezone
 
 
+def saturation_summary(file):
+    """One "camera: saturated / not saturated (max, level)" entry per science camera whose
+    frames have a Saturated attr, joined by "; ", or "none" if no camera has one."""
+    entries = []
+    for name, group in (file["Science"].items() if "Science" in file else []):
+        if not isinstance(group, h5py.Group) or "Science_PSFs" not in group:
+            continue
+        attrs = group["Science_PSFs"].attrs
+        if "Saturated" in attrs:
+            state = "saturated" if attrs["Saturated"] else "not saturated"
+            entries.append(f"{name}: {state} (max {attrs['Max_Value']:g}, level {attrs['Saturation_Level']:g})")
+    return "; ".join(entries) or "none"
+
+
 def analyze_and_report(file_name, report_dir):
     """
     Run the PSF analysis, the atmosphere characterization and the frozen-flow
@@ -33,6 +47,7 @@ def analyze_and_report(file_name, report_dir):
     with h5py.File(file_name, "r") as file:
         span = observation_span(file)
         telescope = telescope_name(file) or "Unknown telescope"
+        saturation = saturation_summary(file)
     date = utc_date(span[0]) if span is not None else datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     psf = PSF_Processing(file_name)
@@ -67,6 +82,7 @@ def analyze_and_report(file_name, report_dir):
         "loop_leak": f"{atm_char.loop_leak:.3f}",
         "loop_freq": f"{atm_char.freq:.1f}",
         "logo": copy_logo(run_dir),
+        "saturation": saturation,
     }
     if av.VMag:
         inputs.update(VMag=f"{av.VMag:.2f}", RMag=f"{av.RMag:.2f}", JMag=f"{av.JMag:.2f}", HMag=f"{av.HMag:.2f}")

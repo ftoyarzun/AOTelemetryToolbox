@@ -74,7 +74,8 @@ def annular_psf(size, pupil_px, tilt, obstruction):
 
 def write_observation(path, duration=3.0, fps=1000, speed=5.0, direction_deg=30.0, r0=0.10, diameter=1.5,
                       n_across=17, loop_status=None, loop_status_in_attr=False, science=True,
-                      science_fps=100, elevation=60.0, loop_gain=0.5, loop_leak=0.99, t0=1.7e9, seed=0):
+                      science_fps=100, elevation=60.0, loop_gain=0.5, loop_leak=0.99, t0=1.7e9, seed=0,
+                      camera="camera"):
     """
     Write a synthetic observation to `path` and return a dict of its true
     values (r0 at 500 nm in m, speed in m/s, tau0 in s, elevation).
@@ -82,7 +83,8 @@ def write_observation(path, duration=3.0, fps=1000, speed=5.0, direction_deg=30.
     `loop_status` is the per-sample recorded loop command (default: closed
     loop throughout), written as the WFS/loop_status dataset, or as the WFS
     attribute with `loop_status_in_attr`, or left out when it is False.
-    `science=False` leaves out the Science group.
+    `science=False` leaves out the Science group. The science frames go to
+    Science/<camera>, or directly in Science (the older layout) with `camera=None`.
     """
     rng = np.random.default_rng(seed)
     n_samples = int(round(duration * fps))
@@ -159,14 +161,20 @@ def write_observation(path, duration=3.0, fps=1000, speed=5.0, direction_deg=30.
             frames = np.array([annular_psf(size, size // SAMPLING, rng.normal(0, 0.05, 2), OBSTRUCTION)
                                for _ in range(n_psf)])
             frames = frames / frames.max() * 1e4 + rng.normal(0, 1.0, frames.shape) + 10
-            sci.create_dataset("PSF_TimeStamps", data=t0 + np.arange(n_psf) / science_fps)
-            psfs = sci.create_dataset("Science_PSFs", data=frames)
+            frames_grp = sci
+            if camera is not None:
+                sci.attrs["Analysed_Camera"] = camera
+                frames_grp = sci.create_group(camera)
+            frames_grp.create_dataset("PSF_TimeStamps", data=t0 + np.arange(n_psf) / science_fps)
+            psfs = frames_grp.create_dataset("Science_PSFs", data=frames)
             psfs.attrs["Exposure_Time"] = 1 / science_fps
             psfs.attrs["FPS"] = science_fps
             psfs.attrs["Gain"] = 1
             psfs.attrs["Sampling"] = SAMPLING
             psfs.attrs["Wavelength"] = WAVELENGTH_SCIENCE
             psfs.attrs["Bandpass"] = 0.0
+            if camera is not None:
+                psfs.attrs["Calibration_Wavelength"] = WAVELENGTH_SCIENCE
 
         cal = file.create_group("Calibration")
         # One mode fewer than actuators, like OOPAO's (a square M2C has no telling orientation)
@@ -174,7 +182,8 @@ def write_observation(path, duration=3.0, fps=1000, speed=5.0, direction_deg=30.
         cal.create_dataset("Z2C", data=z2c)
         cal.attrs["Diameter"] = diameter
         cal.attrs["Obstruction_ratio"] = OBSTRUCTION
-        cal.attrs["Science_Calibration_Wavelength"] = WAVELENGTH_SCIENCE
+        if camera is None:
+            cal.attrs["Science_Calibration_Wavelength"] = WAVELENGTH_SCIENCE
         cal.attrs["AO_Calibration_Wavelength"] = WAVELENGTH_AO
         cal.attrs["SkyCalibPupilRatio"] = 1.0
         cal.attrs["Actuators_in_diameter"] = n_across

@@ -2,93 +2,199 @@
 # this machine. Read by aott/telemetry.py (python -m aott.telemetry <target> <duration_s>),
 # and its [output] section by aott/AutomaticAnalysis.py and aott/NightlyReport.py.
 # The instrument values (site, pupil, wavelengths...) are in config/instrument.toml.
-# Replace every "TODO": telemetry.py refuses to start while a required value is
-# still "TODO" or missing. data_grabber_rama.toml and windows_dev.toml hold filled-in
+# data_grabber_ekarus.toml, data_grabber_rama.toml and windows_dev.toml hold filled-in
 # values for other machines to copy from.
-
-# Shared-memory (dao) images to read from, given as the path of the .im.shm file.
-# Scalar settings (fps, gain, ...) are read as the [0, 0] element of their image.
-
-[shm.wfs]
-# calibrated wavefront sensor frames
-frames = "TODO"
-# valid pixel map of the wavefront sensor, read once
-valid_pixel_map = "TODO"
-# wavefront sensor measurements, grabbed together with the frames
-measurements = "TODO"
-# wavefront sensor frame rate [Hz], saved as the loop frequency
-fps = "TODO"
-# wavefront sensor camera gain
-gain = "TODO"
-
-[shm.dm]
-# deformable mirror commands, grabbed together with the wavefront sensor frames
-commands = "TODO"
-# modes to commands matrix, read once
-m2c = "TODO"
-# dm actuator grid map
-dm_map = "TODO"
-
-[shm.loop]
-# loop command (open/closed status), grabbed together with the DM commands
-cmd = "TODO"
-# loop gain and leak
-gain = "TODO"
-leak = "TODO"
-
-[shm.science]
-# calibrated science camera frames
-frames = "TODO"
-# exposure time
-dit = "TODO"
-# science camera frame rate [Hz]
-fps = "TODO"
-# science camera gain
-gain = "TODO"
-# science camera background (dark), full frame, read once and cropped with
-# [acquisition.science_crop] like the frames, saved as Science/Dark.
-# Required when science_background_subtracted = false, optional otherwise.
-# background = "TODO"
+#
+# What is recorded is described by two kinds of entries, each naming where it goes in the
+# HDF5 file:
+#
+#   [threads.<name>]          one acquisition thread. Every thread runs in parallel for the
+#                             duration given on the command line. Each iteration waits for a
+#                             new frame of its `pacer` stream, then reads the current value of
+#                             its other streams.
+#   [threads.<name>.streams.<stream>]
+#                             one shared memory recorded at every iteration of its thread
+#   [static.<name>]           one shared memory (or .npy file, or constant) read once, before
+#                             the grab
+#
+# Destinations: `dataset = "Group/Name"` stores an array; `attr = "Group/Name@Attr"` stores
+# the [0, 0] element of the image (anything else in the image is only kept by a dataset).
+# Both accept a list. "@Attr" alone is an attr of the file root.
+#
+# The analysis reads fixed destinations: the entries below that are not commented out are
+# the ones it needs, so keep their destinations and fill in their shared memories. telemetry.py
+# refuses to start while a needed destination is missing or a value is still "TODO". Add any
+# other shared memory with the destination of your choice: the analysis ignores it, and it
+# is kept in the file.
+#
+# Stream options:
+#   shm               path of the .im.shm file
+#   dataset           where the kept samples go, one per row
+#   timestamps        where the shm timestamps of the kept samples go (Unix time)
+#   keep_every        keep one sample out of this many (default 1). The streams the analysis
+#                     lines up with the loop (DM commands, measurements, loop status) keep all.
+#   mean              where the mean of every sample read goes (kept or not)
+#   window            part of the frame to keep, in pixels, as { y = [start, stop], x = [start, stop] }
+#   sliceable         true (default) if the shm crops to `window` itself, which is faster;
+#                     false reads the whole frame and crops it
+#   background        a static entry subtracted from every sample, which is then stored as
+#                     float32. Leave it out when the shm frames are already background subtracted.
+#   saturation_level  writes Max_Value, Saturation_Level and Saturated (max above the level,
+#                     before the background is subtracted) attrs on the dataset
+#   description       written as a Description attr of the dataset
+#
+# Static entry options:
+#   source            .im.shm or .npy path; or `value` for a constant with no shm
+#   dataset / attr    destinations, see above
+#   window_of         "thread.stream": crop the array like that stream's frames
+#   description       written as a Description attr of the dataset
 
 [acquisition]
-# dao semaphore number the readers wait on
+# dao semaphore number the readers wait on (a thread can override it with its own `semaphore`)
 semaphore = "TODO"
-# keep one wavefront sensor frame out of this many (1 keeps all of them)
-wfs_frame_step = 1
-# true if the science frames in the shm are already background subtracted. If false,
-# [shm.science] background is subtracted from every frame, stored as float32.
-science_background_subtracted = true
-# true if the science shms can crop to [acquisition.science_crop] themselves
-# (get_data(y=..., x=...)), which is faster. If false, the whole frame is read and cropped.
-science_shm_sliceable = true
+# the science camera the analysis uses: its thread writes to Science/<analysed_camera>/, and
+# config/instrument.toml has a [science_camera.<analysed_camera>] section
+analysed_camera = "camera"
 # Optional: CPU cores python -m aott.observe runs on (grab, analysis and report), like
 # taskset -c. Linux only, ignored elsewhere. Leave it out to use every core.
 # cpus = [2, 3, 4, 5]
-
-# Optional window of the science frame to read, in pixels as [start, stop].
-# Leave both lines out to read the whole frame.
-# [acquisition.science_crop]
-# y = [0, 400]
-# x = [0, 400]
-
-[calibration]
-# Each value is either a .npy file or a dao .im.shm file, read once.
-# Zernike to DM commands matrix, saved as Calibration/Z2C, (n_act, n_zernike) either way round
-Z2C = "TODO"
-
-# Optional: uncomment the ones that exist. A dataset whose line is left out is
-# not written to the HDF5 file.
-# interaction matrix, saved as Calibration/Interaction_Matrix
-# interaction_matrix = "TODO"
-# wavefront sensor dark and reference frame, saved as WFS/Dark and WFS/Reference_Frame
-# wfs_dark = "TODO"
-# wfs_reference_frame = "TODO"
-# DM flat and offset commands, saved as WFS/DM_flat and WFS/DM_offset
-# dm_flat = "TODO"
-# dm_offset = "TODO"
 
 [output]
 # folder for the observation HDF5 files, a subfolder per UTC date is created inside
 hdf5_dir = "TODO"
 # folder for the PDF reports, a subfolder per date is created inside
 report_dir = "TODO"
+
+
+# ---------------------------------------------------------------- loop thread
+
+[threads.loop]
+pacer = "wfs_frames"
+# static entry with the expected rate [Hz], used to size the buffers
+rate = "wfs_fps"
+
+[threads.loop.streams.wfs_frames]
+# calibrated wavefront sensor frames
+shm = "TODO"
+dataset = "WFS/WFS_Images"
+timestamps = "WFS/WFS_TimeStamps"
+keep_every = 1
+# mean = "WFS/Mean_Frame"
+
+[threads.loop.streams.dm_commands]
+# deformable mirror commands
+shm = "TODO"
+dataset = "WFS/DM_commands"
+timestamps = "WFS/DM_TimeStamps"
+
+[threads.loop.streams.wfs_measurements]
+# wavefront sensor measurements, in DM command space
+shm = "TODO"
+dataset = "WFS/WFS_measurements"
+
+[threads.loop.streams.loop_status]
+# loop command (open/closed status, nonzero = closed loop)
+shm = "TODO"
+dataset = "WFS/loop_status"
+
+
+# ---------------------------------------------------------------- science camera thread
+
+[threads.camera]
+pacer = "frames"
+rate = "camera_fps"
+
+[threads.camera.streams.frames]
+# science camera frames
+shm = "TODO"
+dataset = "Science/camera/Science_PSFs"
+timestamps = "Science/camera/PSF_TimeStamps"
+# window = { y = [0, 400], x = [0, 400] }
+# sliceable = true
+# background = "camera_background"
+# saturation_level = 65400
+
+
+# ---------------------------------------------------------------- read once
+
+[static.wfs_fps]
+# wavefront sensor frame rate [Hz], also the loop frequency
+source = "TODO"
+attr = ["WFS/WFS_Images@FPS", "WFS@Loop_Freq"]
+
+[static.wfs_gain]
+# wavefront sensor camera gain
+source = "TODO"
+attr = "WFS/WFS_Images@Gain"
+
+[static.valid_pixel_map]
+# valid pixel map of the wavefront sensor
+source = "TODO"
+dataset = "WFS/Valid_Pixel_Map"
+
+[static.dm_map]
+# DM actuator grid map
+source = "TODO"
+dataset = "WFS/DM_Map"
+
+[static.m2c]
+# modes to commands matrix, (n_act, n_modes) either way round
+source = "TODO"
+dataset = "Calibration/M2C"
+
+[static.z2c]
+# Zernike to DM commands matrix, (n_act, n_zernike) either way round
+source = "TODO"
+dataset = "Calibration/Z2C"
+
+[static.loop_gain]
+source = "TODO"
+attr = "WFS@Loop_Gain"
+
+[static.loop_leak]
+source = "TODO"
+attr = "WFS@Loop_Leak"
+
+[static.camera_fps]
+# science camera frame rate [Hz]
+source = "TODO"
+attr = "Science/camera/Science_PSFs@FPS"
+
+[static.camera_dit]
+# science camera exposure time [s]
+source = "TODO"
+attr = "Science/camera/Science_PSFs@Exposure_Time"
+
+[static.camera_gain]
+# science camera gain
+source = "TODO"
+attr = "Science/camera/Science_PSFs@Gain"
+
+# Optional: uncomment the ones that exist.
+
+# science camera background, cropped like the frames; subtracted from them if the frames
+# stream names it as its `background`
+# [static.camera_background]
+# source = "TODO"
+# dataset = "Science/camera/Dark"
+# window_of = "camera.frames"
+
+# [static.interaction_matrix]
+# source = "TODO"
+# dataset = "Calibration/Interaction_Matrix"
+
+# [static.wfs_dark]
+# source = "TODO"
+# dataset = "WFS/Dark"
+
+# [static.wfs_reference_frame]
+# source = "TODO"
+# dataset = "WFS/Reference_Frame"
+
+# [static.dm_flat]
+# source = "TODO"
+# dataset = "WFS/DM_flat"
+
+# [static.dm_offset]
+# source = "TODO"
+# dataset = "WFS/DM_offset"
