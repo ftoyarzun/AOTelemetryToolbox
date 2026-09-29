@@ -61,3 +61,24 @@ def test_newest_file_exits_when_nothing_qualifies(tmp_path):
     _observation(tmp_path / "a.hdf5", time.time(), analysed=True)
     with pytest.raises(SystemExit):
         newest_file(tmp_path, unanalysed_only=True)
+
+
+@pytest.mark.parametrize("answer, deleted", [("y", True), ("", False)])
+def test_discard_deletes_newest_file_and_report_after_confirmation(output_config, monkeypatch, answer, deleted):
+    from aott import discard
+
+    hdf5_dir, report_dir = output_config
+    now = time.time()
+    date = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+    older, newest = hdf5_dir / date / "older.hdf5", hdf5_dir / date / "newest.hdf5"
+    _observation(older, now - 600)
+    _observation(newest, now - 60)
+    report = report_dir / date / "ao_reportnewest.pdf"
+    report.parent.mkdir(parents=True)
+    report.write_text("pdf")
+
+    monkeypatch.setattr("sys.argv", ["discard"])
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    discard.main()
+    assert newest.exists() != deleted and report.exists() != deleted
+    assert older.exists()
